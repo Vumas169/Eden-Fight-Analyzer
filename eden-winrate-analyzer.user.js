@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.78
+// @version      0.79
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.78";
+  const VERSION = "0.79";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2347,6 +2347,8 @@
           const peel = player.stats.ta || 0;
           const interrupts = player.stats.ti || 0;
           const shears = player.stats.br || 0;
+          const diseases = player.stats.td || 0;
+          const nearsights = player.stats.tn || 0;
           const deaths = player.stats.d || 0;
           const dmgShare = shareOf(player.stats.dd || 0, teamDamage);
           const healShare = shareOf(player.stats.hd || 0, teamHeal);
@@ -2370,6 +2372,8 @@
                 ${peel ? `<span title="Targets peeled"><b class="peel">${peel}</b> peel</span>` : ""}
                 ${interrupts ? `<span title="Targets interrupted"><b class="int">${interrupts}</b> rupt</span>` : ""}
                 ${shears ? `<span title="Targets sheared"><b class="shear">${shears}</b> shear</span>` : ""}
+                ${diseases ? `<span title="Targets diseased"><b class="disease">${diseases}</b> disease</span>` : ""}
+                ${nearsights ? `<span title="Targets nearsighted"><b class="ns">${nearsights}</b> ns</span>` : ""}
                 ${deaths ? `<span class="ewa-pl-death" title="Deaths">✝ ${deaths}</span>` : ""}
               </div>
             </div>
@@ -4206,6 +4210,8 @@
 
       .ewa-pl-nums .int { color: #b39ddb; }
       .ewa-pl-nums .shear { color: #9fb0c4; }
+      .ewa-pl-nums .disease { color: #a5c27a; }
+      .ewa-pl-nums .ns { color: #c9a4d8; }
       .ewa-pl-share { font-style: normal; color: var(--faint); opacity: .72; margin-left: 3px; }
       .ewa-pl-nums > span { white-space: nowrap; }
 
