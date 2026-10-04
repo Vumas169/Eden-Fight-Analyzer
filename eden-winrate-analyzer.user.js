@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.84
+// @version      0.85
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.84";
+  const VERSION = "0.85";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -811,15 +811,11 @@
     const h2hField = $("#ewa-h2h");
     if (h2hField) h2hField.value = "";
 
-    setInputValue(field, name);
-
     // Without "exact" Eden also lists names that only start the same way
-    // ("Bob" also finds "Bobby"). Eden reads the checkbox when Search is pressed.
-    const exactBox = document.querySelector("#select_exact");
-    if (exactBox && name && !exactBox.checked) {
-      exactBox.checked = true;
-      exactBox.dispatchEvent(new Event("change", { bubbles: true }));
-    }
+    // ("Bob" also finds "Bobby"). Set before the name, so any search Eden
+    // starts on the input already uses it.
+    setExact(!!name);
+    setInputValue(field, name);
 
     resetCollected();
     showAllFights = false;
@@ -891,6 +887,15 @@
     body.scrollTop += box.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
   }
 
+  // Eden's "exact" checkbox. Eden only stores the value on change and reads
+  // it when Search is pressed, so setting it never starts a search itself.
+  function setExact(on) {
+    const box = document.querySelector("#select_exact");
+    if (!box || box.checked === on) return;
+    box.checked = on;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
+  }
+
   // Back to the full list: no name, every group size, full period. One request.
   function resetAll() {
     const field = document.querySelector("#search2");
@@ -918,6 +923,7 @@
       return;
     }
 
+    setExact(false);
     setInputValue(field, "");
 
     // Eden clamps min against max, so min goes first.
@@ -1422,7 +1428,7 @@
                 <span class="ewa-fight-opp" title="${esc(fight.winners.join(", "))}"><i class="ewa-fight-res w">W</i>${realmMark(fight.winnerRealm)}<span class="ewa-namelist">${nameLinks(fight.winners) || "-"}</span></span>
                 <span class="ewa-fight-opp loser" title="${esc(fight.losers.join(", "))}"><i class="ewa-fight-res l">L</i>${realmMark(fight.loserRealm)}<span class="ewa-namelist">${nameLinks(fight.losers) || "-"}</span></span>
               </div>
-              <span class="ewa-dur ${d.cls}" title="${d.hint}">${time}</span>
+              <span class="ewa-dur ${d.cls}" title="${esc(d.hint)}">${time}</span>
               <div class="ewa-fight-meta">
                 <span>${fmtDate(fight.date)}</span>
                 <span>${fight.matchup || ""}</span>
@@ -1588,7 +1594,7 @@
             ${(() => {
               const d = durationClass(row.seconds, row.size);
               const text = row.seconds !== null ? fmtDuration(row.seconds) : esc(row.duration || "-");
-              return `<span class="ewa-dur ${d.cls}" title="${d.hint}">${text}</span>`;
+              return `<span class="ewa-dur ${d.cls}" title="${esc(d.hint)}">${text}</span>`;
             })()}
             <div class="ewa-fight-meta">
               <span>${fmtDate(row.date)}</span>
@@ -1988,8 +1994,8 @@
       `<span class="ewa-chip ewa-role-${ROLE_CLASS[group.role]}">${group.count > 1 ? `<b>${group.count}×</b>` : ""}${esc(group.cls)}</span>`
     ).join("");
 
-    // Below six players the support core says nothing, so it stays hidden.
-    const support = info.size >= SUPPORT_LINE_FROM && info.core.length
+    // Only groups from SUPPORT_LINE_FROM have a core (see compInfo)
+    const support = info.core.length
       ? `<div class="ewa-comp-support"><span>Support:</span>${info.core.join(" · ")}</div>`
       : "";
 
@@ -2306,8 +2312,8 @@
       <div class="ewa-hero">
         ${heroSideHtml(group1, comp1, fight && fight.a && fight.a.l, true)}
         <div class="ewa-hero-mid">
-          <span class="ewa-hero-matchup">${matchup ? matchup.label : ""}</span>
-          <span class="ewa-hero-time ${duration.cls}" title="${duration.hint}">${seconds !== null ? fmtDuration(seconds) : "-"}</span>
+          <span class="ewa-hero-matchup">${matchup ? esc(matchup.label) : ""}</span>
+          <span class="ewa-hero-time ${duration.cls}" title="${esc(duration.hint)}">${seconds !== null ? fmtDuration(seconds) : "-"}</span>
           <span class="ewa-hero-date">${started ? fmtDate(started) : ""}</span>
         </div>
         ${heroSideHtml(group2, comp2, fight && fight.b && fight.b.l, false)}
@@ -2553,7 +2559,7 @@
       if (!response.ok) {
         const error = edenError(`Eden HTTP ${response.status}`);
         error.status = response.status;
-        error.retryAfter = Number(response.headers.get("Retry-After")) || 0; // seconds, if Eden sends it
+        error.retryAfter = response.headers.get("Retry-After") || ""; // seconds or a date, if Eden sends it
         throw error;
       }
       return parseEdenJson(text);
@@ -2658,7 +2664,8 @@
           timeout: DB_TIMEOUT,
           onload: res => done(res.status, res.responseText),
           onerror: () => reject(dbError("Database not reachable")),
-          ontimeout: () => reject(dbError("Database does not answer"))
+          ontimeout: () => reject(dbError("Database does not answer")),
+          onabort: () => reject(dbError("Database request aborted"))
         });
       } else {
         const controller = new AbortController();
@@ -2723,18 +2730,23 @@
   // ---------------------------------------------------------------
   // Data collection in the background
   // ---------------------------------------------------------------
-  // At most one request to Eden every 2 seconds, in one tab only, with a
-  // daily limit. On errors from Eden it pauses, and the pause doubles as
-  // long as the errors go on.
+  // One request to Eden per step, in one tab only, with a daily limit. The
+  // pace adapts to Eden's rate limit (see COLLECT). On other errors from
+  // Eden it pauses, and the pause doubles as long as the errors go on.
 
   const COLLECT = {
-    tickMs: 2 * SECOND,         // fastest pace: one request to Eden per tick
+    tickMs: 2 * SECOND,         // normal pace: one request to Eden every 2 s
+    minTickMs: SECOND,          // fastest pace, only reached without recent 429
+    afterLimitFloorMs: 2 * SECOND, // after a 429 the pace stays at least this slow ...
+    afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
     maxTickMs: 30 * SECOND,     // slowest pace after repeated "too many requests"
     slowDown: 1.5,              // pace factor after Eden answered 429
-    speedUpAfter: 150,          // successful steps before the pace speeds up again
+    speedUpEveryMs: 5 * MINUTE, // the pace speeds up at most this often ...
+    speedUpAfter: 20,           // ... and only after this many successful steps in a row
     speedUp: 0.9,               // pace factor when speeding up
+    maxRetryAfterMs: 30 * MINUTE, // cap for the wait time Eden asks for
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
-    dailyLimit: 15000,          // requests to Eden per day, about 8 hours of work
+    dailyLimit: 15000,          // requests to Eden per day, 4 to 8 hours of work depending on the pace
     listEveryMs: 20 * MINUTE,   // the general list holds the latest 500 fights
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
     maxPauseMs: 2 * HOUR,
@@ -2768,8 +2780,10 @@
       pauseReason: s.pauseReason || "",
       lastInfo: s.lastInfo || "",
       lastAt: s.lastAt || 0,
-      pace: Math.min(Math.max(s.pace || COLLECT.tickMs, COLLECT.tickMs), COLLECT.maxTickMs),
-      okInRow: s.okInRow || 0
+      pace: Math.min(Math.max(s.pace || COLLECT.tickMs, COLLECT.minTickMs), COLLECT.maxTickMs),
+      lastLimitAt: Math.min(s.lastLimitAt || 0, Date.now()), // a clock set back must not hold the floor
+      lastSpeedAt: Math.min(s.lastSpeedAt || 0, Date.now()),
+      okInRow: Math.min(s.okInRow || 0, COLLECT.speedUpAfter)
     };
   }
 
@@ -2790,6 +2804,12 @@
       return true;
     }
     return false;
+  }
+
+  // Read only: does this tab hold the collector role right now?
+  function ownsCollectorLock() {
+    const lock = storageGet(COLLECT_LOCK_KEY);
+    return !lock || lock.tab === TAB_ID || Date.now() - lock.t > COLLECT.lockTtlMs;
   }
 
   function heartbeat() {
@@ -2819,7 +2839,13 @@
 
   async function jobDetail(token, id) {
     countEdenRequest();
-    const json = await edenFetchJson(FIGHT_URL(id), {});
+    let json;
+    try {
+      json = await edenFetchJson(FIGHT_URL(id), {});
+    } catch (error) {
+      if (error.status === 429) jobs.fights.unshift(id); // try this fight again after the pause
+      throw error;
+    }
     heartbeat();
     if (json.notFound) {
       await sbRpc("report_missing", { p_token: token, p_fight: id });
@@ -2836,9 +2862,14 @@
     try {
       data = await edenJson(PLAYER_URL(job.name, job.size));
     } catch (error) {
-      // One player with an odd name must not stop everything. The job counts
-      // as done, the Eden error still counts towards the pause, also when
-      // the report itself fails.
+      // A rate limit says nothing about this player: the job goes back to
+      // the queue. Any other error: one player with an odd name must not
+      // stop everything, so the job counts as done, and the Eden error still
+      // counts towards the pause, also when the report itself fails.
+      if (error.status === 429) {
+        jobs.crawl.unshift(job);
+        throw error;
+      }
       await sbRpc("report_crawl", { p_token: token, p_name: job.name, p_size: job.size, p_count: -1 }).catch(() => {});
       throw error;
     }
@@ -2853,17 +2884,46 @@
     collectInfo(`${job.name}${job.size ? ` (${job.size}-man)` : ""}: ${fmt(entries.length)} fights, ${fmt(inserted)} new`);
   }
 
+  // Speeds up by speedUp at most every speedUpEveryMs, and only after
+  // speedUpAfter successful steps in a row. Time based, so a slow pace after
+  // repeated 429 recovers within hours, not days. Within afterLimitHoldMs of
+  // the last 429 the pace stays at afterLimitFloorMs or slower.
+  function paceAfterSuccess(state) {
+    const now = Date.now();
+    const patch = { okInRow: Math.min(state.okInRow + 1, COLLECT.speedUpAfter) };
+    if (state.backoff) Object.assign(patch, { backoff: 0, pauseReason: "" });
+
+    const floor = now - state.lastLimitAt < COLLECT.afterLimitHoldMs ? COLLECT.afterLimitFloorMs : COLLECT.minTickMs;
+    const due = patch.okInRow >= COLLECT.speedUpAfter && now - state.lastSpeedAt >= COLLECT.speedUpEveryMs;
+    if (due && state.pace > floor) {
+      Object.assign(patch, { okInRow: 0, lastSpeedAt: now, pace: Math.max(floor, state.pace * COLLECT.speedUp) });
+    }
+    return patch;
+  }
+
+  // Retry-After comes as seconds or as an HTTP date
+  function retryAfterMs(value) {
+    if (!value) return 0;
+    const seconds = Number(value);
+    const ms = Number.isFinite(seconds) ? seconds * SECOND : Date.parse(value) - Date.now();
+    return Number.isFinite(ms) && ms > 0 ? Math.min(ms, COLLECT.maxRetryAfterMs) : 0;
+  }
+
   function handleCollectError(error) {
+    // Any error breaks the run of successful steps the speed up waits for
+    collectSave({ okInRow: 0 });
+
     // 429 "too many requests" is Eden's rate limit, not an outage. Slow
     // down for good and wait as long as Eden asks, instead of returning to
     // the old pace after a long pause and hitting the limit again.
     if (error.eden && error.status === 429) {
       const state = collectState();
       const pace = Math.min(Math.max(state.pace * COLLECT.slowDown, state.pace + SECOND), COLLECT.maxTickMs);
-      const wait = error.retryAfter ? error.retryAfter * SECOND : COLLECT.rateLimitPauseMs;
+      const wait = retryAfterMs(error.retryAfter) || COLLECT.rateLimitPauseMs;
       collectSave({
         pace,
         okInRow: 0,
+        lastLimitAt: Date.now(),
         pauseUntil: Date.now() + wait,
         pauseReason: `Eden asks to slow down (429), new pace one request every ${(pace / SECOND).toFixed(1)} s`
       });
@@ -2908,49 +2968,83 @@
   // setTimeout set from inside another timer). Two ways around that:
   // 1. The pause between two steps is timed by a worker. Workers are not
   //    slowed down. Some pages do not allow workers, then:
-  // 2. The pause is a plain setTimeout, but it is set right after a network
-  //    answer, not from inside a timer, so the browser does not count it as
-  //    a re-arming timer either.
+  // 2. The pause is a plain setTimeout, set right after a network answer,
+  //    not from inside a timer, so the browser does not count it as a
+  //    re-arming timer either. Steps without a network request (paused,
+  //    another tab collects) do not get this benefit; those may be slowed
+  //    to once a minute in a hidden tab, which only delays the end of a pause.
   // The collector therefore runs as a loop: one step, then a pause, then
   // the next step. A step never overlaps with the next one.
   let timerMode = "starting";
   let workerSleep = null;
 
+  const WORKER_CHECK_MS = 3 * SECOND;   // the worker must answer within this time to be used
+  const WORKER_GRACE_MS = 10 * SECOND;  // a worker pause that takes this much longer counts as lost
+
   function startWorkerTimer() {
     return new Promise(resolve => {
+      let url = null;
       try {
         const code = "onmessage = e => setTimeout(() => postMessage(e.data), e.data.ms);";
-        const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+        url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
         const worker = new Worker(url);
         const waiting = new Map();
         let nextId = 1;
+
+        // If the worker dies, every pause still waiting ends at once and the
+        // loop goes on with the page timer.
+        const fail = () => {
+          worker.terminate();
+          for (const done of waiting.values()) done();
+          waiting.clear();
+          workerSleep = null;
+          timerMode = "page";
+        };
+
         worker.onmessage = event => {
           const done = waiting.get(event.data.id);
           waiting.delete(event.data.id);
           if (done) done();
         };
-        const sleep = ms => new Promise(done => {
-          const id = nextId++;
-          waiting.set(id, done);
-          worker.postMessage({ id, ms });
-        });
-        // Only trust the worker once it has answered a first time
-        const check = setTimeout(() => {
-          worker.terminate();
-          resolve(null);
-        }, 3 * SECOND);
-        sleep(0).then(() => {
-          clearTimeout(check);
-          URL.revokeObjectURL(url);
-          resolve(sleep);
-        });
         worker.onerror = () => {
-          clearTimeout(check);
-          worker.terminate();
+          fail();
           resolve(null);
         };
+
+        // Each pause also has a page timer as a safety net, so a lost
+        // message can never stop the collector for good.
+        const sleep = ms => new Promise(done => {
+          const id = nextId++;
+          const startedAt = Date.now();
+          const backup = setTimeout(() => {
+            if (!waiting.delete(id)) return;
+            done();
+            // Far too late means the whole tab was frozen or the computer
+            // slept: not the worker's fault. Only a backup that fired on time
+            // shows that the worker lost the message.
+            const late = Date.now() - startedAt - (ms + WORKER_GRACE_MS);
+            if (late < WORKER_GRACE_MS) fail();
+          }, ms + WORKER_GRACE_MS);
+          waiting.set(id, () => {
+            clearTimeout(backup);
+            done();
+          });
+          worker.postMessage({ id, ms });
+        });
+
+        const check = setTimeout(() => {
+          fail();
+          resolve(null);
+        }, WORKER_CHECK_MS);
+        sleep(0).then(() => {
+          clearTimeout(check);
+          if (timerMode !== "page") resolve(sleep); // not if the check already gave up
+        });
       } catch (error) {
         resolve(null);
+      } finally {
+        // The worker has its code once it is created; a failed start needs no URL either
+        if (url) setTimeout(() => URL.revokeObjectURL(url), WORKER_CHECK_MS);
       }
     });
   }
@@ -2967,8 +3061,12 @@
   function keepAwake() {
     try {
       if (navigator.locks) {
-        navigator.locks.request("ewa-keep-awake", () => new Promise(() => {}));
-        awakeMode.push("lock");
+        // One lock per tab: an exclusive lock with a shared name would only
+        // ever be held by the first tab, the others would wait forever.
+        navigator.locks.request(`ewa-keep-awake-${TAB_ID}`, () => {
+          awakeMode.push("lock");
+          return new Promise(() => {});
+        }).catch(() => {});
       }
     } catch (error) {
       // not available, never mind
@@ -2981,6 +3079,9 @@
       b.onicecandidate = event => event.candidate && a.addIceCandidate(event.candidate).catch(() => {});
       const channel = a.createDataChannel("ewa");
       channel.onopen = () => awakeMode.push("rtc");
+      channel.onclose = () => {
+        awakeMode = awakeMode.filter(mode => mode !== "rtc");
+      };
       a.createOffer()
         .then(offer => a.setLocalDescription(offer))
         .then(() => b.setRemoteDescription(a.localDescription))
@@ -3011,7 +3112,6 @@
   }
 
   async function collectorTick() {
-    if (collectBusy) return;
     let token = getToken();
     if (!token) {
       if (!collectState().enabled || Date.now() - lastRegister < COLLECT.registerEveryMs) return;
@@ -3051,14 +3151,7 @@
         else await jobCrawl(token, jobs.crawl.shift());
       }
       edenFailsInRow = 0;
-      const after = collectState();
-      const okInRow = after.okInRow + 1;
-      const patch = { okInRow };
-      if (after.backoff) Object.assign(patch, { backoff: 0, pauseReason: "" });
-      if (okInRow >= COLLECT.speedUpAfter && after.pace > COLLECT.tickMs) {
-        Object.assign(patch, { okInRow: 0, pace: Math.max(COLLECT.tickMs, after.pace * COLLECT.speedUp) });
-      }
-      collectSave(patch);
+      collectSave(paceAfterSuccess(collectState()));
     } catch (error) {
       handleCollectError(error);
     } finally {
@@ -3347,7 +3440,7 @@
         ${sortRows(rows, "cls", ANA_MIN_FIGHTS).map(r => {
           const selected = ana.sel && ana.sel.cls === r.cls && ana.sel.realm === r.realm;
           return rowHtml(r, `${r.total < ANA_MIN_FIGHTS ? "is-thin" : ""} ${selected ? "is-sel" : ""}`,
-            `data-ana-cls="${r.cls}" data-ana-crealm="${r.realm}" title="Show opponents and players of this class"`);
+            `data-ana-cls="${Number(r.cls)}" data-ana-crealm="${Number(r.realm)}" title="Show opponents and players of this class"`);
         }).join("")}
       </div>
       <div class="ewa-ana-note">Greyed out below ${ANA_MIN_FIGHTS} fights. Group size is the smaller side.</div>
@@ -3398,14 +3491,16 @@
     if (!s.enabled) lines.push(s.pauseReason ? `Off: ${esc(s.pauseReason)}` : "Off");
     else if (now < s.pauseUntil) lines.push(`Paused until ${fmtDate(new Date(s.pauseUntil))}${s.pauseReason ? ` (${esc(s.pauseReason)})` : ""}`);
     else if (s.count >= COLLECT.dailyLimit) lines.push("Daily limit reached, continues tomorrow");
+    else if (!ownsCollectorLock()) lines.push("Another tab is collecting");
     else lines.push(collectBusy ? "Active, working ..." : "Active");
 
     if (migrateState) lines.push(esc(migrateState));
     lines.push(`Background mode: ${timerMode === "worker" ? "worker timer" : "page timer"}${awakeMode.length ? `, kept awake (${awakeMode.join(", ")})` : ", not kept awake"}`);
-    lines.push(`Pace: one request every ${(s.pace / SECOND).toFixed(1)} s${s.pace > COLLECT.tickMs ? " (slowed down by Eden)" : ""}`);
+    const limitedRecently = Date.now() - s.lastLimitAt < COLLECT.afterLimitHoldMs;
+    lines.push(`Pace: one request every ${(s.pace / SECOND).toFixed(1)} s${limitedRecently ? " (Eden asked to slow down within the last hour)" : ""}`);
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
-    lines.push(`Queue: ${jobs.fights.length} classes, ${jobs.crawl.length} players`);
+    lines.push(`Queue: ${jobs.fights.length} fights to read classes from, ${jobs.crawl.length} player lists`);
     if (s.lastInfo) lines.push(`Last: ${esc(s.lastInfo)}`);
     return lines.join("<br>");
   }
@@ -4495,6 +4590,7 @@
       const hidden = body.style.display === "none";
       body.style.display = hidden ? "block" : "none";
       panel.classList.toggle("is-collapsed", !hidden); // hides the back to top button as well
+      if (hidden) topButton.hidden = body.scrollTop < TOP_BUTTON_FROM; // scroll position may have changed
       $("#ewa-collapse").textContent = hidden ? "−" : "+";
     });
 
