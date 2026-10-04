@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.85
+// @version      0.86
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.85";
+  const VERSION = "0.86";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -81,8 +81,8 @@
   // Comp settings (free to adjust)
   // ---------------------------------------------------------------
 
-  // Default support core per realm. Shown last in the comp row and only
-  // highlighted when part of it is missing.
+  // Default support core per realm. From SUPPORT_LINE_FROM players it is
+  // taken out of the comp row and listed in the support line below it.
   const CORE = {
     Albion: ["Cleric", "Friar", "Minstrel"],
     Midgard: ["Healer", "Healer", "Shaman"],
@@ -1929,12 +1929,11 @@
     const unknown = classes.length - known.length;
     const realm = realmOf(known);
 
-    // Take out the support core, remember what is missing. Small groups
+    // Take out the support core. Small groups
     // have no core: there every class, a healer as well, stays in the list,
     // because the separate support line only shows from SUPPORT_LINE_FROM.
     const variable = [...known];
     const coreFound = [];
-    const coreMissing = [];
     const core = classes.length >= SUPPORT_LINE_FROM ? (CORE[realm] || []) : [];
 
     for (const cls of core) {
@@ -1942,8 +1941,6 @@
       if (index >= 0) {
         variable.splice(index, 1);
         coreFound.push(cls);
-      } else {
-        coreMissing.push(cls);
       }
     }
 
@@ -1969,7 +1966,6 @@
       unknown,
       groups: groupedClasses(variable, order, roleFn),
       core: coreFound,
-      coreMissing,
       roleFn,
       known: known.length,
       size: classes.length
@@ -2746,7 +2742,7 @@
     speedUp: 0.9,               // pace factor when speeding up
     maxRetryAfterMs: 30 * MINUTE, // cap for the wait time Eden asks for
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
-    dailyLimit: 15000,          // requests to Eden per day, 4 to 8 hours of work depending on the pace
+    dailyLimit: 40000,          // requests to Eden per day, about one every 2 s around the clock
     listEveryMs: 20 * MINUTE,   // the general list holds the latest 500 fights
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
     maxPauseMs: 2 * HOUR,
