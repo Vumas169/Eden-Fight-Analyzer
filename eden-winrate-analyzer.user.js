@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.79
+// @version      0.80
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.79";
+  const VERSION = "0.80";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2859,36 +2859,72 @@
 
   let lastRegister = 0;
 
-  // Browsers slow normal timers in background tabs down to once a minute.
-  // Timers inside a worker are not slowed down, so the clock runs there.
-  // If the page does not allow workers, the normal timer is used.
-  function startTicker(fn, ms) {
-    let fallback = null;
-    const useInterval = () => {
-      if (!fallback) fallback = setInterval(fn, ms);
-    };
-    try {
-      const code = `setInterval(() => postMessage(0), ${ms});`;
-      const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
-      const worker = new Worker(url);
-      let alive = false;
-      worker.onmessage = () => {
-        if (!alive) URL.revokeObjectURL(url); // the worker runs, its code URL is not needed any more
-        alive = true;
-        fn();
-      };
-      worker.onerror = () => {
-        worker.terminate();
-        useInterval();
-      };
-      setTimeout(() => {
-        if (!alive) {
+  // Browsers slow timers in background tabs down to about once a minute,
+  // but only timers that keep re-arming themselves (setInterval, or a
+  // setTimeout set from inside another timer). Two ways around that:
+  // 1. The pause between two steps is timed by a worker. Workers are not
+  //    slowed down. Some pages do not allow workers, then:
+  // 2. The pause is a plain setTimeout, but it is set right after a network
+  //    answer, not from inside a timer, so the browser does not count it as
+  //    a re-arming timer either.
+  // The collector therefore runs as a loop: one step, then a pause, then
+  // the next step. A step never overlaps with the next one.
+  let timerMode = "starting";
+  let workerSleep = null;
+
+  function startWorkerTimer() {
+    return new Promise(resolve => {
+      try {
+        const code = "onmessage = e => setTimeout(() => postMessage(e.data), e.data.ms);";
+        const url = URL.createObjectURL(new Blob([code], { type: "text/javascript" }));
+        const worker = new Worker(url);
+        const waiting = new Map();
+        let nextId = 1;
+        worker.onmessage = event => {
+          const done = waiting.get(event.data.id);
+          waiting.delete(event.data.id);
+          if (done) done();
+        };
+        const sleep = ms => new Promise(done => {
+          const id = nextId++;
+          waiting.set(id, done);
+          worker.postMessage({ id, ms });
+        });
+        // Only trust the worker once it has answered a first time
+        const check = setTimeout(() => {
           worker.terminate();
-          useInterval();
-        }
-      }, ms * 3);
-    } catch (error) {
-      useInterval();
+          resolve(null);
+        }, 3 * SECOND);
+        sleep(0).then(() => {
+          clearTimeout(check);
+          URL.revokeObjectURL(url);
+          resolve(sleep);
+        });
+        worker.onerror = () => {
+          clearTimeout(check);
+          worker.terminate();
+          resolve(null);
+        };
+      } catch (error) {
+        resolve(null);
+      }
+    });
+  }
+
+  const pageSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+
+  async function runCollector() {
+    workerSleep = await startWorkerTimer();
+    timerMode = workerSleep ? "worker" : "page";
+    for (;;) {
+      const started = Date.now();
+      try {
+        await collectorTick();
+      } catch (error) {
+        // collectorTick handles its own errors, this is only a safety net
+      }
+      const wait = Math.max(200, COLLECT.tickMs - (Date.now() - started));
+      await (workerSleep || pageSleep)(wait);
     }
   }
 
@@ -3276,6 +3312,7 @@
     else lines.push(collectBusy ? "Active, working ..." : "Active");
 
     if (migrateState) lines.push(esc(migrateState));
+    if (timerMode === "page") lines.push("Timer: page (this page does not allow a worker; keep the tab visible if it gets slow)");
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
     lines.push(`Queue: ${jobs.fights.length} classes, ${jobs.crawl.length} players`);
@@ -4386,7 +4423,7 @@
     showTab(currentTab);
 
     // Data collection in the background, only on the fight list
-    startTicker(collectorTick, COLLECT.tickMs);
+    runCollector();
     migrateOldArchive();
     tuneDurations();
     window.addEventListener("pagehide", () => {
