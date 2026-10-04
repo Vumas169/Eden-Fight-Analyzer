@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.81
+// @version      0.82
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.81";
+  const VERSION = "0.82";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -3906,6 +3906,7 @@
 
       #ewa-panel.is-detail { width: 880px; }
       .ewa-top-wrap { position: absolute; right: 22px; bottom: 16px; z-index: 2; }
+      #ewa-panel.is-collapsed .ewa-top-wrap { display: none; }
       #ewa-panel button#ewa-top {
         padding: 6px 11px; border-radius: 99px; background: var(--bronze); color: var(--ink);
         border-color: var(--parch-2); box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
@@ -4453,6 +4454,7 @@
       const body = $("#ewa-body");
       const hidden = body.style.display === "none";
       body.style.display = hidden ? "block" : "none";
+      panel.classList.toggle("is-collapsed", !hidden); // hides the back to top button as well
       $("#ewa-collapse").textContent = hidden ? "−" : "+";
     });
 
