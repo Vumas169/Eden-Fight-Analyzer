@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.82
+// @version      0.83
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.82";
+  const VERSION = "0.83";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -1923,12 +1923,15 @@
     const unknown = classes.length - known.length;
     const realm = realmOf(known);
 
-    // Take out the support core, remember what is missing
+    // Take out the support core, remember what is missing. Small groups
+    // have no core: there every class, a healer as well, stays in the list,
+    // because the separate support line only shows from SUPPORT_LINE_FROM.
     const variable = [...known];
     const coreFound = [];
     const coreMissing = [];
+    const core = classes.length >= SUPPORT_LINE_FROM ? (CORE[realm] || []) : [];
 
-    for (const cls of (CORE[realm] || [])) {
+    for (const cls of core) {
       const index = variable.indexOf(cls);
       if (index >= 0) {
         variable.splice(index, 1);
