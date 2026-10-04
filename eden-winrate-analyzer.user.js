@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.80
+// @version      0.81
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.80";
+  const VERSION = "0.81";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -42,6 +42,9 @@
 
   // Eden's matchup filter and the group size buttons go up to this size
   const MAX_GROUP = 8;
+
+  // The back to top button appears once the panel is scrolled this far (px)
+  const TOP_BUTTON_FROM = 400;
 
   // ---------------------------------------------------------------
   // Fight duration (free to adjust)
@@ -809,6 +812,15 @@
     if (h2hField) h2hField.value = "";
 
     setInputValue(field, name);
+
+    // Without "exact" Eden also lists names that only start the same way
+    // ("Bob" also finds "Bobby"). Eden reads the checkbox when Search is pressed.
+    const exactBox = document.querySelector("#select_exact");
+    if (exactBox && name && !exactBox.checked) {
+      exactBox.checked = true;
+      exactBox.dispatchEvent(new Event("change", { bubbles: true }));
+    }
+
     resetCollected();
     showAllFights = false;
 
@@ -2913,7 +2925,45 @@
 
   const pageSleep = ms => new Promise(resolve => setTimeout(resolve, ms));
 
+  // Chrome slows hidden tabs down hard and may freeze them after a while.
+  // It leaves pages alone that hold a Web Lock or keep a WebRTC connection
+  // open. Both cost next to nothing: the lock is held until the tab closes,
+  // and the WebRTC connection runs between two endpoints inside this page,
+  // nothing leaves the computer.
+  let awakeMode = [];
+
+  function keepAwake() {
+    try {
+      if (navigator.locks) {
+        navigator.locks.request("ewa-keep-awake", () => new Promise(() => {}));
+        awakeMode.push("lock");
+      }
+    } catch (error) {
+      // not available, never mind
+    }
+
+    try {
+      const a = new RTCPeerConnection();
+      const b = new RTCPeerConnection();
+      a.onicecandidate = event => event.candidate && b.addIceCandidate(event.candidate).catch(() => {});
+      b.onicecandidate = event => event.candidate && a.addIceCandidate(event.candidate).catch(() => {});
+      const channel = a.createDataChannel("ewa");
+      channel.onopen = () => awakeMode.push("rtc");
+      a.createOffer()
+        .then(offer => a.setLocalDescription(offer))
+        .then(() => b.setRemoteDescription(a.localDescription))
+        .then(() => b.createAnswer())
+        .then(answer => b.setLocalDescription(answer))
+        .then(() => a.setRemoteDescription(b.localDescription))
+        .catch(() => {});
+      window.__ewaAwake = [a, b, channel]; // keep references so nothing gets collected
+    } catch (error) {
+      // WebRTC blocked, then only the lock helps
+    }
+  }
+
   async function runCollector() {
+    keepAwake();
     workerSleep = await startWorkerTimer();
     timerMode = workerSleep ? "worker" : "page";
     for (;;) {
@@ -3312,7 +3362,7 @@
     else lines.push(collectBusy ? "Active, working ..." : "Active");
 
     if (migrateState) lines.push(esc(migrateState));
-    if (timerMode === "page") lines.push("Timer: page (this page does not allow a worker; keep the tab visible if it gets slow)");
+    lines.push(`Background mode: ${timerMode === "worker" ? "worker timer" : "page timer"}${awakeMode.length ? `, kept awake (${awakeMode.join(", ")})` : ", not kept awake"}`);
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
     lines.push(`Queue: ${jobs.fights.length} classes, ${jobs.crawl.length} players`);
@@ -3446,6 +3496,7 @@
       [data, stat] = await Promise.all([anaLoadWindow(force), loadStatic()]);
     } catch (error) {
       if (renderId === anaRenderId) out.innerHTML = `<div class="ewa-warn">Analysis not loaded: ${esc(error.message)}</div>`;
+      renderAnaSide(); // the loading status does not depend on the analysis
       return;
     }
     if (renderId !== anaRenderId) return;
@@ -3760,6 +3811,9 @@
         </div>
         <button id="ewa-collapse" title="Collapse">−</button>
       </div>
+      <div class="ewa-top-wrap">
+        <button id="ewa-top" title="Back to top" hidden>↑ Top</button>
+      </div>
 
       <div id="ewa-body">
         ${detail ? "" : `
@@ -3851,6 +3905,12 @@
       }
 
       #ewa-panel.is-detail { width: 880px; }
+      .ewa-top-wrap { position: absolute; right: 22px; bottom: 16px; z-index: 2; }
+      #ewa-panel button#ewa-top {
+        padding: 6px 11px; border-radius: 99px; background: var(--bronze); color: var(--ink);
+        border-color: var(--parch-2); box-shadow: 0 4px 14px rgba(0, 0, 0, .45);
+      }
+      #ewa-panel button#ewa-top:hover { background: var(--parch); }
       #ewa-panel * { box-sizing: border-box; }
 
       #ewa-panel button {
@@ -4380,6 +4440,14 @@
         }
       });
     }
+
+    // Back to top: shows up once the panel has been scrolled down a bit
+    const body = $("#ewa-body");
+    const topButton = $("#ewa-top");
+    body.addEventListener("scroll", () => {
+      topButton.hidden = body.scrollTop < TOP_BUTTON_FROM;
+    }, { passive: true });
+    topButton.addEventListener("click", () => body.scrollTo({ top: 0, behavior: "smooth" }));
 
     $("#ewa-collapse").addEventListener("click", () => {
       const body = $("#ewa-body");
