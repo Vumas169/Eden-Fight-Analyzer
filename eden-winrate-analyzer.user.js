@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.83
+// @version      0.84
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.83";
+  const VERSION = "0.84";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2550,7 +2550,12 @@
       const response = await pageWindow.fetch(url, { credentials: "same-origin", headers, signal: controller.signal });
       if (response.status === 404) return { notFound: true };
       const text = await response.text();
-      if (!response.ok) throw edenError(`Eden HTTP ${response.status}`);
+      if (!response.ok) {
+        const error = edenError(`Eden HTTP ${response.status}`);
+        error.status = response.status;
+        error.retryAfter = Number(response.headers.get("Retry-After")) || 0; // seconds, if Eden sends it
+        throw error;
+      }
       return parseEdenJson(text);
     } catch (error) {
       if (error.eden) throw error;
@@ -2723,7 +2728,12 @@
   // long as the errors go on.
 
   const COLLECT = {
-    tickMs: 2 * SECOND,         // at most one request to Eden per tick
+    tickMs: 2 * SECOND,         // fastest pace: one request to Eden per tick
+    maxTickMs: 30 * SECOND,     // slowest pace after repeated "too many requests"
+    slowDown: 1.5,              // pace factor after Eden answered 429
+    speedUpAfter: 150,          // successful steps before the pace speeds up again
+    speedUp: 0.9,               // pace factor when speeding up
+    rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
     dailyLimit: 15000,          // requests to Eden per day, about 8 hours of work
     listEveryMs: 20 * MINUTE,   // the general list holds the latest 500 fights
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
@@ -2757,7 +2767,9 @@
       backoff: s.backoff || 0,
       pauseReason: s.pauseReason || "",
       lastInfo: s.lastInfo || "",
-      lastAt: s.lastAt || 0
+      lastAt: s.lastAt || 0,
+      pace: Math.min(Math.max(s.pace || COLLECT.tickMs, COLLECT.tickMs), COLLECT.maxTickMs),
+      okInRow: s.okInRow || 0
     };
   }
 
@@ -2842,6 +2854,23 @@
   }
 
   function handleCollectError(error) {
+    // 429 "too many requests" is Eden's rate limit, not an outage. Slow
+    // down for good and wait as long as Eden asks, instead of returning to
+    // the old pace after a long pause and hitting the limit again.
+    if (error.eden && error.status === 429) {
+      const state = collectState();
+      const pace = Math.min(Math.max(state.pace * COLLECT.slowDown, state.pace + SECOND), COLLECT.maxTickMs);
+      const wait = error.retryAfter ? error.retryAfter * SECOND : COLLECT.rateLimitPauseMs;
+      collectSave({
+        pace,
+        okInRow: 0,
+        pauseUntil: Date.now() + wait,
+        pauseReason: `Eden asks to slow down (429), new pace one request every ${(pace / SECOND).toFixed(1)} s`
+      });
+      edenFailsInRow = 0;
+      return;
+    }
+
     if (error.eden) {
       edenFailsInRow += 1;
       if (edenFailsInRow < 2) {
@@ -2976,7 +3005,7 @@
       } catch (error) {
         // collectorTick handles its own errors, this is only a safety net
       }
-      const wait = Math.max(200, COLLECT.tickMs - (Date.now() - started));
+      const wait = Math.max(200, collectState().pace - (Date.now() - started));
       await (workerSleep || pageSleep)(wait);
     }
   }
@@ -3022,7 +3051,14 @@
         else await jobCrawl(token, jobs.crawl.shift());
       }
       edenFailsInRow = 0;
-      if (collectState().backoff) collectSave({ backoff: 0, pauseReason: "" });
+      const after = collectState();
+      const okInRow = after.okInRow + 1;
+      const patch = { okInRow };
+      if (after.backoff) Object.assign(patch, { backoff: 0, pauseReason: "" });
+      if (okInRow >= COLLECT.speedUpAfter && after.pace > COLLECT.tickMs) {
+        Object.assign(patch, { okInRow: 0, pace: Math.max(COLLECT.tickMs, after.pace * COLLECT.speedUp) });
+      }
+      collectSave(patch);
     } catch (error) {
       handleCollectError(error);
     } finally {
@@ -3366,6 +3402,7 @@
 
     if (migrateState) lines.push(esc(migrateState));
     lines.push(`Background mode: ${timerMode === "worker" ? "worker timer" : "page timer"}${awakeMode.length ? `, kept awake (${awakeMode.join(", ")})` : ", not kept awake"}`);
+    lines.push(`Pace: one request every ${(s.pace / SECOND).toFixed(1)} s${s.pace > COLLECT.tickMs ? " (slowed down by Eden)" : ""}`);
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
     lines.push(`Queue: ${jobs.fights.length} classes, ${jobs.crawl.length} players`);
