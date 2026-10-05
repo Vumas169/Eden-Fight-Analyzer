@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.86
+// @version      0.87
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.86";
+  const VERSION = "0.87";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2732,7 +2732,7 @@
 
   const COLLECT = {
     tickMs: 2 * SECOND,         // normal pace: one request to Eden every 2 s
-    minTickMs: SECOND,          // fastest pace, only reached without recent 429
+    minTickMs: 1.5 * SECOND,    // fastest pace, only reached without recent 429 (1 s hit Eden's limit too often)
     afterLimitFloorMs: 2 * SECOND, // after a 429 the pace stays at least this slow ...
     afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
     maxTickMs: 30 * SECOND,     // slowest pace after repeated "too many requests"
