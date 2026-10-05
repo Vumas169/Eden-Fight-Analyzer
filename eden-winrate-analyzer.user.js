@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.88
+// @version      0.89
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.88";
+  const VERSION = "0.89";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2737,9 +2737,9 @@
     afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
     maxTickMs: 30 * SECOND,     // slowest pace after repeated "too many requests"
     slowDown: 1.5,              // pace factor after Eden answered 429
-    speedUpEveryMs: 5 * MINUTE, // the pace speeds up at most this often ...
-    speedUpAfter: 20,           // ... and only after this many successful steps in a row
-    speedUp: 0.9,               // pace factor when speeding up
+    speedUpEveryMs: 2 * MINUTE, // within the hour after a 429 the pace speeds up at most this often ...
+    speedUpAfter: 5,            // ... and only after this many successful steps in a row
+    speedUp: 0.8,               // pace factor when speeding up
     maxRetryAfterMs: 30 * MINUTE, // cap for the wait time Eden asks for
     idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
@@ -2819,15 +2819,19 @@
     collectSave({ count: collectState().count + 1, lastEdenAt: Date.now() });
   }
 
-  // After a longer break (collecting switched off, browser closed) Eden's
-  // rate limit has long recovered, so the pace starts at the fastest step
-  // again instead of where it was. The break counts from the last request
-  // or from the end of a pause Eden asked for, whichever is later; a pause
-  // after a 429 is followed by the next request at once, so it never counts.
-  function resetPaceAfterBreak(state) {
-    const lastActivity = Math.max(state.lastEdenAt, Math.min(state.pauseUntil, Date.now()));
-    const idle = Date.now() - lastActivity > COLLECT.idleResetMs;
-    if (!idle || state.pace <= COLLECT.minTickMs) return state;
+  // Back to the fastest pace when Eden's rate limit has surely recovered:
+  // - the last 429 is more than afterLimitHoldMs ago (or there never was one)
+  // - or nothing was collected for idleResetMs (switched off, browser
+  //   closed). The break counts from the last request or from the end of a
+  //   pause Eden asked for, whichever is later; after a 429 pause the next
+  //   request follows at once, so such a pause never counts as a break.
+  function resetPace(state) {
+    if (state.pace <= COLLECT.minTickMs) return state;
+    const now = Date.now();
+    const limitOver = now - state.lastLimitAt >= COLLECT.afterLimitHoldMs;
+    const lastActivity = Math.max(state.lastEdenAt, Math.min(state.pauseUntil, now));
+    const idle = now - lastActivity > COLLECT.idleResetMs;
+    if (!limitOver && !idle) return state;
     return collectSave({ pace: COLLECT.minTickMs, lastLimitAt: 0, okInRow: 0, lastSpeedAt: 0 });
   }
 
@@ -2894,10 +2898,10 @@
     collectInfo(`${job.name}${job.size ? ` (${job.size}-man)` : ""}: ${fmt(entries.length)} fights, ${fmt(inserted)} new`);
   }
 
-  // Speeds up by speedUp at most every speedUpEveryMs, and only after
-  // speedUpAfter successful steps in a row. Time based, so a slow pace after
-  // repeated 429 recovers within hours, not days. Within afterLimitHoldMs of
-  // the last 429 the pace stays at afterLimitFloorMs or slower.
+  // Within afterLimitHoldMs of the last 429: speed up by speedUp at most
+  // every speedUpEveryMs, after speedUpAfter successful steps in a row, but
+  // not below afterLimitFloorMs. Once that hour is over, resetPace() puts
+  // the pace straight back to the fastest step.
   function paceAfterSuccess(state) {
     const now = Date.now();
     const patch = { okInRow: Math.min(state.okInRow + 1, COLLECT.speedUpAfter) };
@@ -3137,7 +3141,7 @@
       renderCollectStatus(); // cheap, only writes when the text changed
       return;
     }
-    state = resetPaceAfterBreak(state);
+    state = resetPace(state);
 
     collectBusy = true;
     try {
@@ -3499,7 +3503,7 @@
     const lines = [];
     const now = Date.now();
 
-    if (!s.enabled) lines.push(s.pauseReason ? `Off: ${esc(s.pauseReason)}` : "Off");
+    if (!s.enabled) lines.push(s.pauseReason ? `Stopped: ${esc(s.pauseReason)}` : "Stopped");
     else if (now < s.pauseUntil) lines.push(`Paused until ${fmtDate(new Date(s.pauseUntil))}${s.pauseReason ? ` (${esc(s.pauseReason)})` : ""}`);
     else if (s.count >= COLLECT.dailyLimit) lines.push("Daily limit reached, continues tomorrow");
     else if (!ownsCollectorLock()) lines.push("Another tab is collecting");
@@ -3529,18 +3533,27 @@
     }
     const s = collectState();
     return `
-      <div class="ewa-collect-row">
-        <button id="ewa-collect-toggle">${s.enabled ? "Stop collecting" : "Start collecting"}</button>
-        <button id="ewa-collect-resume" title="End the pause now">End pause</button>
+      <div class="ewa-collect-row ewa-collect-ctrl">
+        <button id="ewa-collect-toggle">${collectButtonLabel(s)}</button>
       </div>
       <div id="ewa-collect-status" class="ewa-collect-lines">${collectStatusText()}</div>
     `;
   }
 
+  // One button: "Stop" while collecting, "Start" when switched off or paused.
+  // Start also ends a pause; the pace stays as it is.
+  const collectRunning = s => s.enabled && Date.now() >= s.pauseUntil;
+  const collectButtonLabel = s => (collectRunning(s) ? "Stop" : "Start");
+
   // Called on every tick, so it only touches the page when the text changed.
   function renderCollectStatus() {
     const box = $("#ewa-collect-status");
     if (!box) return;
+    const button = $("#ewa-collect-toggle");
+    if (button) {
+      const label = collectButtonLabel(collectState());
+      if (button.textContent !== label) button.textContent = label;
+    }
     const html = collectStatusText();
     if (box.dataset.html === html) return;
     box.dataset.html = html;
@@ -3833,12 +3846,8 @@
     if (hit("#ewa-ana-more")) { ana.showAllPlayers = true; renderAnalysis(); return true; }
     if (hit("#ewa-token-save")) { saveToken(); return true; }
     if (hit("#ewa-collect-toggle")) {
-      collectSave({ enabled: !collectState().enabled, pauseReason: "" });
-      renderAnaSide();
-      return true;
-    }
-    if (hit("#ewa-collect-resume")) {
-      collectSave({ pauseUntil: 0, pauseReason: "", backoff: 0 });
+      if (collectRunning(collectState())) collectSave({ enabled: false, pauseReason: "" });
+      else collectSave({ enabled: true, pauseUntil: 0, pauseReason: "", backoff: 0 });
       renderCollectStatus();
       return true;
     }
@@ -3910,6 +3919,7 @@
       .ewa-ana-note { margin-top: 7px; font-size: 11px; color: var(--faint); line-height: 1.45; }
       .ewa-collect-row { display: flex; gap: 6px; align-items: center; flex-wrap: wrap; }
       .ewa-collect-row input { flex: 1; min-width: 180px; }
+      #ewa-panel .ewa-collect-ctrl button { min-width: 72px; }
       .ewa-collect-lines { margin-top: 8px; font-size: 11.5px; color: var(--muted); line-height: 1.6; }
       .ewa-kv { display: grid; grid-template-columns: 130px 1fr; gap: 3px 10px; font-size: 11.5px; }
       .ewa-kv span { color: var(--faint); }
