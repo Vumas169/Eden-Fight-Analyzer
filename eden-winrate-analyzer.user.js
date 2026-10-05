@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.87
+// @version      0.88
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.87";
+  const VERSION = "0.88";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2741,6 +2741,7 @@
     speedUpAfter: 20,           // ... and only after this many successful steps in a row
     speedUp: 0.9,               // pace factor when speeding up
     maxRetryAfterMs: 30 * MINUTE, // cap for the wait time Eden asks for
+    idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
     dailyLimit: 40000,          // requests to Eden per day, about one every 2 s around the clock
     listEveryMs: 20 * MINUTE,   // the general list holds the latest 500 fights
@@ -2779,7 +2780,8 @@
       pace: Math.min(Math.max(s.pace || COLLECT.tickMs, COLLECT.minTickMs), COLLECT.maxTickMs),
       lastLimitAt: Math.min(s.lastLimitAt || 0, Date.now()), // a clock set back must not hold the floor
       lastSpeedAt: Math.min(s.lastSpeedAt || 0, Date.now()),
-      okInRow: Math.min(s.okInRow || 0, COLLECT.speedUpAfter)
+      okInRow: Math.min(s.okInRow || 0, COLLECT.speedUpAfter),
+      lastEdenAt: Math.min(s.lastEdenAt || 0, Date.now())
     };
   }
 
@@ -2814,7 +2816,19 @@
 
   function countEdenRequest() {
     heartbeat();
-    collectSave({ count: collectState().count + 1 });
+    collectSave({ count: collectState().count + 1, lastEdenAt: Date.now() });
+  }
+
+  // After a longer break (collecting switched off, browser closed) Eden's
+  // rate limit has long recovered, so the pace starts at the fastest step
+  // again instead of where it was. The break counts from the last request
+  // or from the end of a pause Eden asked for, whichever is later; a pause
+  // after a 429 is followed by the next request at once, so it never counts.
+  function resetPaceAfterBreak(state) {
+    const lastActivity = Math.max(state.lastEdenAt, Math.min(state.pauseUntil, Date.now()));
+    const idle = Date.now() - lastActivity > COLLECT.idleResetMs;
+    if (!idle || state.pace <= COLLECT.minTickMs) return state;
+    return collectSave({ pace: COLLECT.minTickMs, lastLimitAt: 0, okInRow: 0, lastSpeedAt: 0 });
   }
 
   function collectInfo(text) {
@@ -3118,11 +3132,12 @@
       migrateOldArchive();
     }
 
-    const state = collectState();
+    let state = collectState();
     if (!state.enabled || Date.now() < state.pauseUntil || state.count >= COLLECT.dailyLimit || !isCollectorTab()) {
       renderCollectStatus(); // cheap, only writes when the text changed
       return;
     }
+    state = resetPaceAfterBreak(state);
 
     collectBusy = true;
     try {
