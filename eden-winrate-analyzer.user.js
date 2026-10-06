@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.90
+// @version      0.91
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.90";
+  const VERSION = "0.91";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -896,6 +896,21 @@
     box.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
+  // Reload the list with whatever is set on the Eden page right now (name,
+  // group sizes, exact). Name, head-to-head and period in the panel stay.
+  function refreshList() {
+    const button = document.querySelector("#search_button2");
+    if (!button) {
+      setStatus("Could not find the search button on the Eden page.");
+      return;
+    }
+    const name = getSiteSearchValue();
+    resetCollected();
+    setStatus("Refreshing the list ...");
+    button.click();
+    afterTableReload(null, name ? capitalize(name) : "fights", 0);
+  }
+
   // Back to the full list: no name, every group size, full period. One request.
   function resetAll() {
     const field = document.querySelector("#search2");
@@ -949,6 +964,23 @@
     return fight.size;
   }
 
+  // Size of one side as that side sees it: a 1v3 win is solo for the single
+  // player and a 3-group fight for the three. Eden's matchup label does not
+  // say which number is which side, so the visible name counts decide.
+  function sideSize(fight, won) {
+    const own = won ? fight.winners.length : fight.losers.length;
+    const other = won ? fight.losers.length : fight.winners.length;
+    const m = (fight.matchup || "").match(/(\d+)v(\d+)/i);
+    if (m) {
+      const a = Number(m[1]);
+      const b = Number(m[2]);
+      if (a === b) return a;
+      return Math.abs(a - own) + Math.abs(b - other) <= Math.abs(b - own) + Math.abs(a - other) ? a : b;
+    }
+    const links = won ? fight.winnerLinks : fight.loserLinks;
+    return Math.max(links || 0, own, 1);
+  }
+
   function fightSeconds(fight) {
     if (fight.seconds === undefined) fight.seconds = parseDuration(fight.duration);
     return fight.seconds;
@@ -997,7 +1029,8 @@
         opponentsForStats: opponentList(fight, result, own),
         teammates: (result === "Win" ? fight.winners : fight.losers).filter(name => name !== own),
         matchup: fight.matchup,
-        size: groupSize(fight),
+        size: sideSize(fight, result === "Win"),
+        fightSize: groupSize(fight),
         opponentRealm: result === "Win" ? fight.loserRealm : fight.winnerRealm,
         duration: fight.duration,
         seconds: fightSeconds(fight),
@@ -1320,13 +1353,13 @@
     if (sizes.length < 2) return ""; // only one size, the summary says it already
 
     return `
-      <div class="ewa-section-title">By group size</div>
+      <div class="ewa-section-title">By own group size</div>
       <div class="ewa-sizes">
         ${sizes.map(entry => {
           const total = entry.wins + entry.losses;
           return `
-            <span class="ewa-size" title="${entry.size}v${entry.size}: ${entry.wins} won, ${entry.losses} lost">
-              <b>${entry.size}v${entry.size}</b>
+            <span class="ewa-size" title="${entry.size === 1 ? "Solo" : `Own group of ${entry.size}`}, any enemy size: ${entry.wins} won, ${entry.losses} lost">
+              <b>${entry.size === 1 ? "Solo" : `${entry.size} grp`}</b>
               <span class="ewa-size-wl"><em class="w">${entry.wins}</em>/<em class="l">${entry.losses}</em></span>
               <i>${fmt1(entry.wins / total * 100)}%</i>
             </span>
@@ -1592,7 +1625,7 @@
               ${row.teammates.length ? `<span class="ewa-fight-mates" title="${esc(row.teammates.join(", "))}">with <span class="ewa-namelist">${nameLinks(row.teammates)}</span></span>` : ""}
             </div>
             ${(() => {
-              const d = durationClass(row.seconds, row.size);
+              const d = durationClass(row.seconds, row.fightSize || row.size);
               const text = row.seconds !== null ? fmtDuration(row.seconds) : esc(row.duration || "-");
               return `<span class="ewa-dur ${d.cls}" title="${esc(d.hint)}">${text}</span>`;
             })()}
@@ -3517,7 +3550,7 @@
             `data-ana-cls="${Number(r.cls)}" data-ana-crealm="${Number(r.realm)}" title="Show opponents and players of this class"`);
         }).join("")}
       </div>
-      <div class="ewa-ana-note">Greyed out below ${ANA_MIN_FIGHTS} fights. Group size is the smaller side.</div>
+      <div class="ewa-ana-note">Greyed out below ${ANA_MIN_FIGHTS} fights. Group size is your own side: a 1v3 counts as solo for the single player and as 3 for the three.</div>
     `;
   }
 
@@ -4052,6 +4085,7 @@
         `}
         <div class="ewa-row ewa-buttons">
           <button id="ewa-analyze">${buttonLabel}</button>
+          ${detail ? "" : `<button id="ewa-refresh" title="Reload the fight list with the current settings">Refresh</button>`}
           ${detail ? "" : `<button id="ewa-reset" title="Clear the name, all group sizes, full period">Reset</button>`}
         </div>
         ${detail ? "" : `<div class="ewa-row" id="ewa-matchups"></div>`}
@@ -4290,8 +4324,8 @@
       #ewa-panel button.ewa-load-btn:hover { color: var(--parch); }
       #ewa-panel button.ewa-load-btn.is-on { color: var(--ink); background: var(--bronze); border-color: var(--parch-2); font-weight: 700; }
       #ewa-panel button.ewa-more-btn { width: 100%; margin-top: 7px; font-size: 11px !important; }
-      #ewa-reset { flex: 0 0 auto; padding: 9px 14px; font-size: 12px !important; background: #1e2126; color: var(--muted); }
-      #ewa-reset:hover { color: var(--parch); background: #262a30; }
+      #ewa-reset, #ewa-refresh { flex: 0 0 auto; padding: 9px 14px; font-size: 12px !important; background: #1e2126; color: var(--muted); }
+      #ewa-reset:hover, #ewa-refresh:hover { color: var(--parch); background: #262a30; }
 
       .ewa-h2h {
         margin: 14px 0 4px; padding: 10px 11px 12px;
@@ -4628,6 +4662,11 @@
 
       if (event.target.closest("#ewa-reset")) {
         resetAll();
+        return;
+      }
+
+      if (event.target.closest("#ewa-refresh")) {
+        refreshList();
         return;
       }
 
