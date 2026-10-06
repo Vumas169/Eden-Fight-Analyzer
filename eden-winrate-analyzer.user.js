@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.91
+// @version      0.92
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.91";
+  const VERSION = "0.92";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -666,10 +666,10 @@
     return !!element && element.offsetParent !== null;
   }
 
-  // After a click on Search, Eden rebuilds the table in several batches.
-  // So we wait until the spinner is gone AND the row count has been stable
-  // for a moment.
-  function afterTableReload(expected, label, minRows = 0) {
+  // Only used when the database cannot be reached: Eden fills its table in
+  // several batches, so we wait until the spinner is gone AND the row
+  // count has been stable for a moment.
+  function afterTableReload(label, minRows = 0) {
     clearInterval(reloadPoll);
 
     const started = Date.now();
@@ -682,21 +682,7 @@
     const finish = () => {
       clearInterval(reloadPoll);
       reloadPoll = null;
-      const playerField = $("#ewa-player");
-      if (playerField) playerField.value = capitalize(getSiteSearchValue());
       calculate();
-
-      if (!expected) return;
-
-      const fights = allFights();
-      const outside = fights.filter(fight => {
-        const size = groupSize(fight);
-        return size < expected.min || size > expected.max;
-      }).length;
-
-      if (fights.length && outside === fights.length) {
-        setStatus("Eden did not apply the matchup selection. Please set Min and Max on the page itself.");
-      }
     };
 
     reloadPoll = setInterval(() => {
@@ -739,13 +725,6 @@
     }, POLL_MS);
   }
 
-  function currentRange() {
-    return {
-      min: Number(document.querySelector("#select_matchup_min")?.value || 1),
-      max: Number(document.querySelector("#select_matchup_max")?.value || MAX_GROUP)
-    };
-  }
-
   function renderTicks() {
     const holder = $("#ewa-ticks");
     if (!holder) return;
@@ -773,108 +752,72 @@
       : `${fmt(loaded.length)} fights`;
   }
 
-  // Move slider, scale and analysis to one step
+  // Move slider and scale to one step, then filter
   function setHourIndex(index) {
     hourIndex = index;
     rememberHours(index);
     const slider = $("#ewa-hours");
     if (slider) slider.value = String(index);
     renderTicks();
-    calculate();
+    onFilterChange();
   }
 
   function updateCacheLabel() {
     const label = $("#ewa-cache");
     if (!label) return;
 
-    label.textContent = `${fmt(collected.size)} fights found`;
+    if (feed.source === "db") {
+      const polled = feed.lastPoll ? Date.parse(feed.lastPoll) : 0;
+      const minutes = polled ? Math.max(0, Math.round((Date.now() - polled) / MINUTE)) : null;
+      label.textContent = minutes === null
+        ? "Live from the shared database"
+        : `Live from the shared database · Eden list read ${minutes < 1 ? "just now" : `${minutes} min ago`}`;
+    } else if (feed.source === "eden") {
+      label.textContent = `${fmt(collected.size)} fights on this Eden page · database not reachable`;
+    } else {
+      label.textContent = "Loading ...";
+    }
   }
 
-  // Puts the name into Eden's search field and presses Search there.
-  // That is exactly one request, the same as searching by hand.
-  // Period and group size stay as they are, only the name changes.
+  // Shows a player's fights in the panel. The Eden page itself is left
+  // alone, the fights come from the database.
   function searchPlayer(nameOverride) {
     const input = $("#ewa-player");
     const raw = nameOverride !== undefined ? nameOverride : (input ? input.value : "");
-    const name = String(raw || "").trim();
-    const field = document.querySelector("#search2");
-    const button = document.querySelector("#search_button2");
-
-    if (!field || !button) {
-      setStatus("Could not find the search field on the Eden page.");
-      return;
-    }
-
-    if (input) input.value = name ? capitalize(name) : "";
+    pushNav();
+    setPlayer(raw);
 
     // The head-to-head belongs to the previous player.
     const h2hField = $("#ewa-h2h");
     if (h2hField) h2hField.value = "";
 
-    // Without "exact" Eden also lists names that only start the same way
-    // ("Bob" also finds "Bobby"). Set before the name, so any search Eden
-    // starts on the input already uses it.
-    setExact(!!name);
-    setInputValue(field, name);
-
-    resetCollected();
     showAllFights = false;
-
-    setStatus(name ? `Searching ${capitalize(name)} on the Eden page ...` : "Loading the full list ...");
     $("#ewa-output").innerHTML = "";
-
-    button.click();
-    afterTableReload(null, name ? capitalize(name) : "fights", 0);
-  }
-
-  function loadMatchup(min, max) {
-    const minInput = document.querySelector("#select_matchup_min");
-    const maxInput = document.querySelector("#select_matchup_max");
-    const button = document.querySelector("#search_button2");
-
-    if (!minInput || !maxInput || !button) {
-      setStatus("Could not find the matchup fields on the Eden page.");
-      return;
-    }
-
-    // Eden clamps min to the current max and the other way round, so set
-    // min to 1 first, then max, then min. Nothing gets cut off that way.
-    setInputValue(minInput, 1);
-    setInputValue(maxInput, max);
-    setInputValue(minInput, min);
-
-    resetCollected();
-    showAllFights = false;
-
-    const label = min === max ? `${min}v${min}` : `${min} to ${max} players`;
-    setStatus(`Loading ${label} from Eden ...`);
-    $("#ewa-output").innerHTML = "";
-
-    button.click();
-    afterTableReload({ min, max }, label);
+    const body = $("#ewa-body");
+    if (body) body.scrollTop = 0;
+    return loadFeed();
   }
 
   // Clicking a name does one of two things.
-  // Nothing searched yet: start a real search for that name on the Eden page.
-  // A player already searched: open the head-to-head for that name, seen
-  // from the searched player. Period and group size stay untouched in both.
+  // No player shown: show that player.
+  // A player shown: open the head-to-head for that name, seen from the
+  // shown player. Period and group size stay untouched in both.
   function onNameClick(name) {
     const clicked = String(name || "").trim();
     if (!clicked) return;
 
-    const searched = getSiteSearchValue();
-
-    if (!searched) {
+    if (!viewPlayer) {
       searchPlayer(clicked);
       return;
     }
 
-    if (normalizeName(clicked) === normalizeName(searched)) return; // own name
+    if (normalizeName(clicked) === normalizeName(viewPlayer)) return; // own name
     setHeadToHead(clicked);
   }
 
   function setHeadToHead(name) {
     const field = $("#ewa-h2h");
+    if (name) pushNav();
     if (field) field.value = name ? capitalize(name) : "";
     calculate();
 
@@ -887,98 +830,89 @@
     body.scrollTop += box.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
   }
 
-  // Eden's "exact" checkbox. Eden only stores the value on change and reads
-  // it when Search is pressed, so setting it never starts a search itself.
-  function setExact(on) {
-    const box = document.querySelector("#select_exact");
-    if (!box || box.checked === on) return;
-    box.checked = on;
-    box.dispatchEvent(new Event("change", { bubbles: true }));
-  }
-
-  // Reload the list with whatever is set on the Eden page right now (name,
-  // group sizes, exact). Name, head-to-head and period in the panel stay.
-  function refreshList() {
-    const button = document.querySelector("#search_button2");
-    if (!button) {
-      setStatus("Could not find the search button on the Eden page.");
-      return;
+  // Asks the collector for Eden's list right away, waits a moment for it
+  // and loads the fights again. When nothing collects in this browser, it
+  // only reloads from the database (other users keep it up to date).
+  async function refreshList() {
+    const state = collectState();
+    const collecting = !!getToken() && state.enabled && Date.now() >= state.pauseUntil && state.count < COLLECT.dailyLimit;
+    setStatus("Loading new fights ...");
+    if (collecting) {
+      const asked = Date.now();
+      collectSave({ lastList: 0 });
+      while (Date.now() - asked < FEED.listWaitMs && collectState().lastList < asked) {
+        await pageSleep(400);
+      }
     }
-    const name = getSiteSearchValue();
-    resetCollected();
-    setStatus("Refreshing the list ...");
-    button.click();
-    afterTableReload(null, name ? capitalize(name) : "fights", 0);
+    feedCache.clear();
+    return loadFeed({ force: true });
   }
 
-  // Back to the full list: no name, every group size, full period. One request.
+  // Back to the start: no name, every group size, full period.
   function resetAll() {
-    const field = document.querySelector("#search2");
-    const minInput = document.querySelector("#select_matchup_min");
-    const maxInput = document.querySelector("#select_matchup_max");
-    const button = document.querySelector("#search_button2");
-
-    const playerField = $("#ewa-player");
+    pushNav();
+    setPlayer("");
     const h2hField = $("#ewa-h2h");
-    if (playerField) playerField.value = "";
     if (h2hField) h2hField.value = "";
 
+    sizeSel = 0;
+    sessionSet(SIZE_KEY, 0);
     hourIndex = HOUR_STEPS.length - 1; // All
     rememberHours(hourIndex);
     const slider = $("#ewa-hours");
     if (slider) slider.value = String(hourIndex);
     renderTicks();
+    renderLoadBar();
 
     showAllFights = false;
-    resetCollected();
     $("#ewa-output").innerHTML = "";
-
-    if (!field || !button) {
-      setStatus("Could not find the search field on the Eden page.");
-      return;
-    }
-
-    setExact(false);
-    setInputValue(field, "");
-
-    // Eden clamps min against max, so min goes first.
-    if (minInput && maxInput) {
-      setInputValue(minInput, 1);
-      setInputValue(maxInput, MAX_GROUP);
-      setInputValue(minInput, 1);
-    }
-
-    setStatus("Loading the full list ...");
-    button.click();
-    afterTableReload(null, "fights", 0);
+    return loadFeed();
   }
 
+  // Players on the winning and on the losing side. Fights from the
+  // database know this exactly. Rows read from the Eden page only have the
+  // matchup label, which does not say which number is which side, so the
+  // visible name counts decide.
+  function fightSides(fight) {
+    if (fight.sides) return fight.sides;
+    let sides;
+    if (fight.ws) {
+      sides = { w: fight.ws, l: fight.ls };
+    } else {
+      const w = Math.max(fight.winnerLinks || 0, fight.winners.length, 1);
+      const l = Math.max(fight.loserLinks || 0, fight.losers.length, 1);
+      const m = (fight.matchup || "").match(/(\d+)v(\d+)/i);
+      if (m) {
+        const a = Number(m[1]);
+        const b = Number(m[2]);
+        sides = Math.abs(a - w) + Math.abs(b - l) <= Math.abs(b - w) + Math.abs(a - l) ? { w: a, l: b } : { w: b, l: a };
+      } else {
+        sides = { w, l };
+      }
+    }
+    fight.sides = sides;
+    return sides;
+  }
+
+  // The bigger side, used for the duration marks
   function groupSize(fight) {
-    if (fight.size !== undefined) return fight.size;
-
-    const m = (fight.matchup || "").match(/(\d+)v(\d+)/i);
-    if (m) fight.size = Math.max(Number(m[1]), Number(m[2]));
-    else if (fight.winnerLinks || fight.loserLinks) fight.size = Math.max(fight.winnerLinks, fight.loserLinks, 1);
-    else fight.size = Math.max(fight.winners.length, fight.losers.length, 1);
-
-    return fight.size;
+    const sides = fightSides(fight);
+    return Math.max(sides.w, sides.l);
   }
 
   // Size of one side as that side sees it: a 1v3 win is solo for the single
-  // player and a 3-group fight for the three. Eden's matchup label does not
-  // say which number is which side, so the visible name counts decide.
+  // player and a 3-group fight for the three.
   function sideSize(fight, won) {
-    const own = won ? fight.winners.length : fight.losers.length;
-    const other = won ? fight.losers.length : fight.winners.length;
-    const m = (fight.matchup || "").match(/(\d+)v(\d+)/i);
-    if (m) {
-      const a = Number(m[1]);
-      const b = Number(m[2]);
-      if (a === b) return a;
-      return Math.abs(a - own) + Math.abs(b - other) <= Math.abs(b - own) + Math.abs(a - other) ? a : b;
-    }
-    const links = won ? fight.winnerLinks : fight.loserLinks;
-    return Math.max(links || 0, own, 1);
+    const sides = fightSides(fight);
+    return won ? sides.w : sides.l;
+  }
+
+  // Group size filter: 8 stands for 8 and more
+  const capSize = size => Math.min(size, MAX_GROUP);
+
+  function fightHasSize(fight, size) {
+    const sides = fightSides(fight);
+    return capSize(sides.w) === size || capSize(sides.l) === size;
   }
 
   function fightSeconds(fight) {
@@ -989,28 +923,34 @@
   const capitalize = text => (text ? text.charAt(0).toUpperCase() + text.slice(1) : text);
 
   function calculateWinrate() {
-    const player = capitalize(getSiteSearchValue());
-    const loaded = allFights();
-    const fights = filterByTime(loaded);
+    const player = viewPlayer;
+    const fromDb = feed.source === "db";
 
     updateCacheLabel();
-    updateHourLabel(loaded, fights);
     renderLoadBar();
+    renderFavs();
 
-    if (!loaded.length) {
-      setStatus("No fights found in the table. Is the page fully loaded?");
-      $("#ewa-output").innerHTML = "";
+    if (!feed.source) {
+      setStatus("Loading fights ...");
       return;
     }
 
-    if (!fights.length) {
-      $("#ewa-output").innerHTML = emptyWindowHtml(loaded);
-      setStatus("");
+    const loaded = fromDb ? feed.fights : allFights();
+    const timed = filterByTime(loaded);
+
+    if (!loaded.length) {
+      updateHourLabel(loaded, loaded);
+      $("#ewa-output").innerHTML = "";
+      if (player) setStatus(`No fights of ${player} ${fromDb ? "in the database" : "on this Eden page"}.`);
+      else setStatus(fromDb ? "No fights in this selection." : "No fights found in the table. Is the page fully loaded?");
       return;
     }
 
     if (!player) {
-      renderOverview(fights);
+      const fights = sizeSel ? timed.filter(fight => fightHasSize(fight, sizeSel)) : timed;
+      updateHourLabel(loaded, fights);
+      $("#ewa-output").innerHTML = fights.length ? "" : emptyWindowHtml(loaded);
+      if (fights.length) renderOverview(fights);
       setStatus("");
       return;
     }
@@ -1018,10 +958,12 @@
     const targetNorm = normalizeName(player);
     const rows = [];
 
-    for (const fight of fights) {
+    for (const fight of timed) {
       const own = findPlayerInFight(fight, targetNorm);
       if (own === null) continue;
       const result = fight.winners.includes(own) ? "Win" : "Loss";
+      const size = sideSize(fight, result === "Win");
+      if (sizeSel && capSize(size) !== sizeSel) continue;
 
       rows.push({
         id: fight.id,
@@ -1029,7 +971,7 @@
         opponentsForStats: opponentList(fight, result, own),
         teammates: (result === "Win" ? fight.winners : fight.losers).filter(name => name !== own),
         matchup: fight.matchup,
-        size: sideSize(fight, result === "Win"),
+        size,
         fightSize: groupSize(fight),
         opponentRealm: result === "Win" ? fight.loserRealm : fight.winnerRealm,
         duration: fight.duration,
@@ -1039,6 +981,14 @@
     }
 
     rows.sort((a, b) => (b.date || 0) - (a.date || 0));
+    updateHourLabel(loaded, rows);
+
+    if (!rows.length) {
+      $("#ewa-output").innerHTML = emptyWindowHtml(loaded);
+      setStatus("");
+      return;
+    }
+
     const { mostWins, mostLosses } = topOpponents(rows);
 
     const h2hInput = $("#ewa-h2h");
@@ -1049,13 +999,676 @@
       ? rows.filter(row => findName(row.opponentsForStats, h2hNorm) !== null)
       : null;
 
+    lastPlayerView = { rows, player, mostWins, mostLosses, h2hName, h2hRows };
     renderWinrate(rows, player, mostWins, mostLosses, h2hName, h2hRows);
+    setStatus("");
+  }
 
-    setStatus(
-      rows.length
-        ? ""
-        : `No fights for ${player} in this period (${fmt(fights.length)} of ${fmt(loaded.length)} fights). Widen the period.`
-    );
+  // ---------------------------------------------------------------
+  // Fights tab data: the shared database
+  // ---------------------------------------------------------------
+  // The tab reads its fights from the database. Period and group size are
+  // plain filters then, nothing is asked from Eden. New fights get into the
+  // database through the collector, which reads Eden's list once a minute.
+  // A player whose own list was never fetched gets it fetched once when he
+  // is opened. Without the database the tab shows the rows of this page.
+
+  const FEED = {
+    overviewLimit: 3000,     // newest fights for the overview
+    playerLimit: 5000,       // fights of one player
+    cacheMs: MINUTE,
+    cacheMax: 30,
+    autoMs: MINUTE,          // the open tab reloads this often ...
+    idleMs: 20 * SECOND,     // ... but only this long after the last click or scroll in the panel
+    autoCheckMs: 10 * SECOND,
+    debounceMs: 250,
+    listWaitMs: 8 * SECOND   // Refresh waits this long for the collector to read Eden's list
+  };
+  const PLAYER_KEY = "ewa_player";
+  const SIZE_KEY = "ewa_size";
+
+  let viewPlayer = capitalize(String(sessionGet(PLAYER_KEY) || "").trim());
+  let sizeSel = (() => {
+    const size = Number(sessionGet(SIZE_KEY));
+    return size >= 1 && size <= MAX_GROUP ? size : 0;
+  })();
+  let lastPlayerView = null;
+
+  const feed = { key: "", source: "", fights: [], byId: new Map(), total: 0, capped: false, lastPoll: "", at: 0 };
+  const feedCache = new Map();
+  const crawledNow = new Set();
+  let feedReq = 0;
+  let feedTimer = null;
+  let lastInteraction = 0;
+
+  // Database row: [id, unix seconds, winners size, losers size, winner realm, loser realm, seconds, winners, losers]
+  function fightFromDb(row) {
+    const [id, ts, ws, ls, wr, lr, dur, w, l] = row;
+    const winners = Array.isArray(w) ? w.map(String) : [];
+    const losers = Array.isArray(l) ? l.map(String) : [];
+    const seconds = Number(dur) > 0 ? Math.round(Number(dur)) : null;
+    return {
+      id: `fight_${id}`,
+      date: new Date(Number(ts) * SECOND),
+      matchup: `${ws}v${ls}`,
+      ws: Number(ws) || winners.length || 1,
+      ls: Number(ls) || losers.length || 1,
+      winners,
+      losers,
+      winnerLinks: winners.length,
+      loserLinks: losers.length,
+      winnerRealm: REALM_NAME[wr] || null,
+      loserRealm: REALM_NAME[lr] || null,
+      seconds,
+      duration: seconds === null ? "" : fmtDuration(seconds)
+    };
+  }
+
+  const fightById = id => feed.byId.get(id) || collected.get(id) || null;
+
+  function setPlayer(name) {
+    viewPlayer = capitalize(String(name || "").trim());
+    sessionSet(PLAYER_KEY, viewPlayer);
+    const input = $("#ewa-player");
+    if (input) input.value = viewPlayer;
+  }
+
+  function setSize(size) {
+    sizeSel = size >= 1 && size <= MAX_GROUP ? size : 0;
+    sessionSet(SIZE_KEY, sizeSel);
+    renderLoadBar();
+    onFilterChange();
+  }
+
+  // Period or group size changed. A player's fights are all loaded already,
+  // so only the view is filtered. The overview asks the database again.
+  function onFilterChange() {
+    showAllFights = false;
+    if (viewPlayer || feed.source !== "db") {
+      calculate();
+      return;
+    }
+    clearTimeout(feedTimer);
+    feedTimer = setTimeout(() => loadFeed(), FEED.debounceMs);
+  }
+
+  const feedKey = () => (viewPlayer ? `p|${normalizeName(viewPlayer)}` : `o|${hoursValue()}|${sizeSel}`);
+
+  // A fresh overview of a longer period that holds all of its fights (not
+  // cut at the limit) covers every shorter period as well.
+  function cachedFeed(key) {
+    const fresh = entry => entry && Date.now() - entry.t < FEED.cacheMs;
+    const exact = feedCache.get(key);
+    if (fresh(exact)) return exact;
+    if (viewPlayer) return null;
+    for (const [other, entry] of feedCache) {
+      if (!other.startsWith("o|") || !fresh(entry) || entry.capped) continue;
+      const [, hours, size] = other.split("|");
+      if (Number(size) === sizeSel && Number(hours) >= hoursValue()) return entry;
+    }
+    return null;
+  }
+
+  // Returns true when the fights differ from what is on screen
+  function applyFeed(key, entry) {
+    const before = feed.key === key && feed.source === "db" ? feed.fights : null;
+    Object.assign(feed, {
+      key,
+      source: "db",
+      fights: entry.fights,
+      byId: entry.byId,
+      total: entry.total,
+      capped: entry.capped,
+      lastPoll: entry.lastPoll,
+      at: entry.t
+    });
+    if (!before) return true;
+    const first = list => (list[0] ? list[0].id : "");
+    return before.length !== entry.fights.length || first(before) !== first(entry.fights);
+  }
+
+  // Redraw without jumping: the panel keeps its scroll position
+  function redrawKeepingScroll() {
+    const body = $("#ewa-body");
+    const top = body ? body.scrollTop : 0;
+    calculate();
+    if (body) body.scrollTop = top;
+  }
+
+  // silent: background reload, the panel only changes when there are new fights
+  async function loadFeed(options = {}) {
+    const { force = false, silent = false } = options;
+    clearTimeout(feedTimer);
+    const key = feedKey();
+    const request = ++feedReq;
+    const player = viewPlayer;
+
+    const cached = !force && cachedFeed(key);
+    if (cached) {
+      applyFeed(key, cached);
+      calculate();
+      return;
+    }
+
+    if (!silent) setStatus(player ? `Loading ${player} ...` : "Loading fights ...");
+    const hours = hoursValue();
+    let data;
+    try {
+      data = await sbRpc("fights_feed", player
+        ? { p_name: player, p_limit: FEED.playerLimit }
+        : { p_hours: Number.isFinite(hours) ? hours : null, p_size: sizeSel || null, p_limit: FEED.overviewLimit });
+    } catch (error) {
+      if (request !== feedReq) return;
+      feed.at = Date.now(); // the next automatic try comes after FEED.autoMs
+      if (silent && feed.source) return; // keep what is on screen
+      useEdenPage(error.message);
+      return;
+    }
+    if (request !== feedReq) return;
+
+    const fights = (data && Array.isArray(data.rows) ? data.rows : []).map(fightFromDb);
+    const total = Number(data && data.total) || fights.length;
+    const entry = {
+      t: Date.now(),
+      fights,
+      byId: new Map(fights.map(fight => [fight.id, fight])),
+      total,
+      capped: fights.length < total,
+      lastPoll: (data && data.last_poll) || ""
+    };
+    feedCache.delete(key);
+    feedCache.set(key, entry);
+    while (feedCache.size > FEED.cacheMax) feedCache.delete(feedCache.keys().next().value);
+
+    // The database knows the right spelling of the name
+    if (player && data && data.name && data.name !== player) setPlayer(data.name);
+
+    const changed = applyFeed(key, entry);
+    if (!silent) calculate();
+    else if (changed) redrawKeepingScroll();
+    else updateCacheLabel();
+
+    if (player && data && !data.crawled) crawlPlayer(data.name || player);
+  }
+
+  function useEdenPage(message) {
+    feed.source = "eden";
+    feed.key = "";
+    feed.byId = new Map();
+    if (!collected.size) afterTableReload("fights", 1);
+    else calculate();
+    collectInfo(`Fights tab: database not reachable (${message})`);
+  }
+
+  // A player whose own list was never fetched may miss older fights in the
+  // database. It is fetched once now: one request to Eden, the same as a
+  // search on the Eden page, and stored for everybody.
+  async function crawlPlayer(name) {
+    const key = normalizeName(name);
+    if (!key || crawledNow.has(key)) return;
+    crawledNow.add(key);
+
+    // Collecting switched off, or Eden asked for a break: no request
+    const state = collectState();
+    if (!state.enabled || Date.now() < state.pauseUntil) return;
+    const token = getToken() || await ensureToken();
+    if (!token) return;
+
+    const stillShown = () => normalizeName(viewPlayer) === key;
+    if (stillShown()) setStatus(`Fetching older fights of ${name} from Eden ...`);
+    try {
+      collectSave({ count: collectState().count + 1, lastEdenAt: Date.now() });
+      const data = await edenJson(PLAYER_URL(name, 0));
+      const entries = data.notFound ? [] : edenEntries(data).map(dbEntry);
+      let inserted = 0;
+      if (entries.length) {
+        const res = (await sbRpc("submit_fights", { p_token: token, p_fights: entries })) || {};
+        inserted = res.inserted || 0;
+      }
+      await sbRpc("report_crawl", { p_token: token, p_name: name, p_size: 0, p_count: entries.length });
+      if (!stillShown()) return;
+      if (inserted) await loadFeed({ force: true, silent: true });
+      setStatus("");
+    } catch (error) {
+      if (error.eden && error.status === 429) handleCollectError(error); // the collector slows down as well
+      if (stillShown()) setStatus(`Older fights of ${name} not loaded (${error.message}).`);
+    }
+  }
+
+  const panelOpen = () => {
+    const body = $("#ewa-body");
+    return !!body && body.style.display !== "none";
+  };
+
+  // Reloads the open fights tab once a minute, unless you are just using it
+  function autoRefreshTick() {
+    if (currentTab !== "fights" || !panelOpen() || document.hidden) return;
+    if (Date.now() - lastInteraction < FEED.idleMs || cardVisible()) return;
+    if (Date.now() - feed.at < FEED.autoMs) return;
+    loadFeed({ force: true, silent: true });
+  }
+
+  // ---------------------------------------------------------------
+  // Favorites
+  // ---------------------------------------------------------------
+
+  const FAV_KEY = "ewa-favs";
+  const FAV_MAX = 12;
+  let favs = (() => {
+    const stored = storageGet(FAV_KEY);
+    return Array.isArray(stored) ? stored.filter(name => typeof name === "string" && name.trim()).slice(0, FAV_MAX) : [];
+  })();
+
+  const isFav = name => favs.some(fav => normalizeName(fav) === normalizeName(name));
+
+  function toggleFav(name) {
+    const clean = capitalize(String(name || "").trim());
+    if (!clean) return;
+    if (isFav(clean)) favs = favs.filter(fav => normalizeName(fav) !== normalizeName(clean));
+    else if (favs.length < FAV_MAX) favs = [...favs, clean];
+    else setStatus(`At most ${FAV_MAX} favorites. Remove one first.`);
+    storageSet(FAV_KEY, favs);
+    renderFavs();
+    document.querySelectorAll("#ewa-panel [data-star]").forEach(button => {
+      button.outerHTML = starHtml(button.dataset.star);
+    });
+  }
+
+  function starHtml(name) {
+    const on = isFav(name);
+    return `<button class="ewa-mini ewa-star ${on ? "is-on" : ""}" data-star="${esc(name)}" title="${on ? "Remove from favorites" : "Add to favorites"}">${on ? "★" : "☆"}</button>`;
+  }
+
+  function renderFavs() {
+    const holder = $("#ewa-favs");
+    if (!holder) return;
+    holder.hidden = !favs.length;
+    const html = favs.length ? `
+      <span class="ewa-time-label">Favorites</span>
+      <div class="ewa-fav-list">
+        ${favs.map(name => `<span class="ewa-fav ${normalizeName(name) === normalizeName(viewPlayer) ? "is-on" : ""}" data-fav="${esc(name)}">${esc(name)}<i data-fav-del="${esc(name)}" title="Remove from favorites">×</i></span>`).join("")}
+      </div>
+    ` : "";
+    if (holder.dataset.html === html) return;
+    holder.dataset.html = html;
+    holder.innerHTML = html;
+  }
+
+  // ---------------------------------------------------------------
+  // Copy a short summary (Discord and the like)
+  // ---------------------------------------------------------------
+
+  const COPY_FOOT = "Eden Fight Analyzer by Vumas";
+  const rateOf = (wins, losses) => (wins + losses ? wins / (wins + losses) * 100 : 0);
+
+  function playerCopyText() {
+    const view = lastPlayerView;
+    if (!view) return "";
+    const { rows, player } = view;
+    const wins = rows.filter(row => row.result === "Win").length;
+    const losses = rows.length - wins;
+    const { bestW, bestL } = longestStreaks(rows);
+    const lines = [
+      `**${player}** · ${periodLabel()} · ${sizeLabel(sizeSel)}`,
+      `Win rate ${fmt1(rateOf(wins, losses))}% · ${fmt(rows.length)} fights · ${fmt(wins)} W / ${fmt(losses)} L`,
+      `Streak ${streakOf(rows)} · best ${bestW}W / ${bestL}L`
+    ];
+    const sizes = sizeStats(rows);
+    if (sizes.length > 1) {
+      lines.push(`Own group: ${sizes.map(entry => `${entry.size === 1 ? "Solo" : `${entry.size} grp`} ${fmt1(rateOf(entry.wins, entry.losses))}% (${fmt(entry.wins + entry.losses)})`).join(" · ")}`);
+    }
+    if (view.mostWins.length) lines.push(`Most wins vs: ${view.mostWins.map(entry => `${entry.name} ${entry.wins}`).join(", ")}`);
+    if (view.mostLosses.length) lines.push(`Most losses vs: ${view.mostLosses.map(entry => `${entry.name} ${entry.losses}`).join(", ")}`);
+    if (view.h2hName && view.h2hRows && view.h2hRows.length) {
+      const h2hWins = view.h2hRows.filter(row => row.result === "Win").length;
+      const h2hLosses = view.h2hRows.length - h2hWins;
+      lines.push(`vs ${view.h2hName}: ${h2hWins} W / ${h2hLosses} L (${fmt1(rateOf(h2hWins, h2hLosses))}%)`);
+    }
+    lines.push(COPY_FOOT);
+    return lines.join("\n");
+  }
+
+  function anaCopyText() {
+    const copy = ana.copy;
+    if (!copy) return "";
+    const realmShort = realm => REALM_SHORT[REALM_NAME[realm]] || "?";
+    const rows = sortRows(copy.entries.map(entry => ({ ...entry, label: copy.classes[entry.cls] || `Class ${entry.cls}` })), "cls", ANA_MIN_FIGHTS)
+      .filter(row => row.total >= ANA_MIN_FIGHTS)
+      .slice(0, 15);
+    const lines = [`**Class win rates** · ${copy.win} · ${sizeLabel(ana.size)} · ${ana.realm ? REALM_NAME[ana.realm] : "All realms"}`];
+    rows.forEach((row, index) => lines.push(`${index + 1}. ${row.label} (${realmShort(row.realm)}) ${fmt1(row.rate)}% · ${fmt(row.total)} fights`));
+
+    const vs = ana.sel ? ana.vs.get(anaPlayersKey()) : null;
+    if (vs && vs.length) {
+      const list = vs.map(entry => ({ ...withRate(entry), label: `${copy.classes[entry.oclass] || `Class ${entry.oclass}`} (${realmShort(entry.orealm)})` }))
+        .filter(row => row.total >= ANA_VS_MIN_FIGHTS)
+        .sort((a, b) => b.rate - a.rate);
+      if (list.length) {
+        const item = row => `${row.label} ${fmt1(row.rate)}% (${fmt(row.total)})`;
+        lines.push("", `**${copy.classes[ana.sel.cls] || "Class"} (${realmShort(ana.sel.realm)}) against classes**`);
+        lines.push(`Best: ${list.slice(0, 3).map(item).join(", ")}`);
+        if (list.length > 3) lines.push(`Worst: ${list.slice(-3).reverse().map(item).join(", ")}`);
+      }
+    }
+    lines.push(COPY_FOOT);
+    return lines.join("\n");
+  }
+
+  async function copyText(text, button) {
+    if (!text) return;
+    let ok = false;
+    try {
+      await navigator.clipboard.writeText(text);
+      ok = true;
+    } catch (error) {
+      const area = document.createElement("textarea");
+      area.value = text;
+      area.style.cssText = "position:fixed;left:-9999px;opacity:0";
+      document.body.appendChild(area);
+      area.select();
+      try {
+        ok = document.execCommand("copy");
+      } catch (ignored) {
+        ok = false;
+      }
+      area.remove();
+    }
+    if (!button) return;
+    button.textContent = ok ? "Copied" : "Copy failed";
+    setTimeout(() => {
+      if (button.isConnected) button.textContent = "Copy";
+    }, 1500);
+  }
+
+  // ---------------------------------------------------------------
+  // Hover cards: a name shows the player, a fight row both line-ups
+  // ---------------------------------------------------------------
+
+  const CARD_NAME_DELAY = 300;
+  const CARD_ROW_DELAY = 450;
+  const CARD_CACHE_MS = 5 * MINUTE;
+  const CARD_SIDE_MAX = 12;
+  const cardCache = new Map();  // name|vs names -> { t, pending, data }
+  const classCache = new Map(); // name -> [class id, realm] or null when unknown
+  let cardTimer = null;
+  let cardTarget = null;
+  let cardSeq = 0;
+  let cardMouse = { x: 0, y: 0 };
+
+  function cardElement() {
+    let element = $("#ewa-card");
+    if (!element) {
+      element = document.createElement("div");
+      element.id = "ewa-card";
+      element.hidden = true;
+      $("#ewa-panel").appendChild(element);
+    }
+    return element;
+  }
+
+  const cardVisible = () => {
+    const element = $("#ewa-card");
+    return !!element && !element.hidden;
+  };
+
+  function hideCard() {
+    clearTimeout(cardTimer);
+    cardTimer = null;
+    cardSeq += 1;
+    const element = $("#ewa-card");
+    if (element) element.hidden = true;
+  }
+
+  // Next to the mouse, flipped to the other side near the screen edge
+  function showCard(html) {
+    const element = cardElement();
+    element.innerHTML = html;
+    element.hidden = false;
+    const gap = 14;
+    const width = element.offsetWidth;
+    const height = element.offsetHeight;
+    let x = cardMouse.x + gap;
+    let y = cardMouse.y + gap;
+    if (x + width > window.innerWidth - 8) x = cardMouse.x - width - gap;
+    if (y + height > window.innerHeight - 8) y = window.innerHeight - height - 8;
+    element.style.left = `${Math.max(8, x)}px`;
+    element.style.top = `${Math.max(8, y)}px`;
+  }
+
+  // Whose record against the hovered name: the shown player, otherwise
+  // the favorites.
+  function cardVsNames(name) {
+    const key = normalizeName(name);
+    if (viewPlayer && normalizeName(viewPlayer) !== key) return { label: viewPlayer, names: [viewPlayer] };
+    const list = favs.filter(fav => normalizeName(fav) !== key).slice(0, 20);
+    if (!list.length) return null;
+    return { label: list.length === 1 ? list[0] : "Your favorites", names: list };
+  }
+
+  function className(stat, id) {
+    return stat && id !== null && id !== undefined ? stat.classes[id] || "" : "";
+  }
+
+  function nameCardHtml(name, data, vs, stat) {
+    const realm = data && REALM_NAME[data.realm];
+    const head = `<div class="ewa-card-head">${realmMark(realm)}<b>${esc((data && data.name) || name)}</b></div>`;
+    if (!data) return `${head}<div class="ewa-card-foot">Loading ...</div>`;
+    if (data.error) return `${head}<div class="ewa-card-foot">Not loaded: ${esc(data.error)}</div>`;
+
+    const cls = className(stat, data.class);
+    const role = cls ? roleOf(cls) : "Unknown";
+    const row = (label, wins, losses) => `
+      <div class="ewa-card-row">
+        <span>${esc(label)}</span>
+        <b><em class="w">${fmt(wins)}</em> / <em class="l">${fmt(losses)}</em></b>
+        <i>${wins + losses ? `${fmt1(rateOf(wins, losses))}%` : "-"}</i>
+      </div>`;
+
+    return `
+      ${head}
+      <div class="ewa-card-class">${icon(role)}<span class="ewa-role-${ROLE_CLASS[role]}">${esc(cls || "Class unknown")}</span>${realm ? `<em>${realm}</em>` : ""}</div>
+      ${data.wins + data.losses ? `${row("All fights", data.wins, data.losses)}${row("Last 7 days", data.wins7, data.losses7)}` : `<div class="ewa-card-foot">No fights in the database yet.</div>`}
+      ${vs ? `<div class="ewa-card-sub">Record against ${esc(data.name || name)}</div>${row(vs.label, data.vs_wins, data.vs_losses)}` : ""}
+      ${data.last ? `<div class="ewa-card-foot">Last fight ${fmtDate(new Date(data.last))}</div>` : ""}
+    `;
+  }
+
+  async function showNameCard(name, seq) {
+    const vs = cardVsNames(name);
+    const key = `${normalizeName(name)}|${vs ? vs.names.map(normalizeName).join(",") : ""}`;
+    let entry = cardCache.get(key);
+    if (!entry || Date.now() - entry.t > CARD_CACHE_MS) {
+      entry = { t: Date.now(), data: null, pending: sbRpc("player_card", { p_name: name, p_vs: vs ? vs.names : null }) };
+      cardCache.set(key, entry);
+      entry.pending.then(data => { entry.data = data; }, () => cardCache.delete(key));
+    }
+    if (!entry.data) showCard(nameCardHtml(name, null, vs, null));
+
+    let data;
+    let stat;
+    try {
+      [data, stat] = await Promise.all([entry.pending, loadStatic().catch(() => null)]);
+    } catch (error) {
+      if (seq === cardSeq) showCard(nameCardHtml(name, { error: error.message }, vs, null));
+      return;
+    }
+    if (seq === cardSeq && data) showCard(nameCardHtml(name, data, vs, stat));
+  }
+
+  function fightCardHtml(fight, stat, loading) {
+    const side = (title, names, realm) => {
+      const shown = names.slice(0, CARD_SIDE_MAX);
+      return `
+        <div class="ewa-card-side">
+          <div class="ewa-card-sub">${realmMark(realm)}${title}</div>
+          ${shown.map(name => {
+            const info = classCache.get(name);
+            const cls = info ? className(stat, info[0]) : "";
+            const role = cls ? roleOf(cls) : "Unknown";
+            return `<div class="ewa-card-pl">${icon(role)}<span>${esc(name)}</span><em class="ewa-role-${ROLE_CLASS[role]}">${esc(cls || (loading ? "..." : "?"))}</em></div>`;
+          }).join("")}
+          ${names.length > shown.length ? `<div class="ewa-card-foot">+${names.length - shown.length} more</div>` : ""}
+        </div>`;
+    };
+    const time = fight.seconds !== null && fight.seconds !== undefined ? fmtDuration(fight.seconds) : fight.duration || "";
+    return `
+      <div class="ewa-card-fight">
+        ${side("Winners", fight.winners, fight.winnerRealm)}
+        ${side("Losers", fight.losers, fight.loserRealm)}
+      </div>
+      <div class="ewa-card-foot">${fmtDate(fight.date)}${fight.matchup ? ` · ${esc(fight.matchup)}` : ""}${time ? ` · ${esc(time)}` : ""} · click opens the fight</div>
+    `;
+  }
+
+  async function showFightCard(fight, seq) {
+    const names = [...fight.winners, ...fight.losers].slice(0, 400);
+    const missing = names.filter(name => !classCache.has(name));
+    let stat = null;
+    if (missing.length) {
+      showCard(fightCardHtml(fight, null, true));
+      try {
+        const [list, loaded] = await Promise.all([sbRpc("chars_info", { p_names: missing }), loadStatic().catch(() => null)]);
+        for (const name of missing) classCache.set(name, null);
+        for (const [name, cls, realm] of list || []) classCache.set(name, [cls, realm]);
+        stat = loaded;
+      } catch (error) {
+        if (seq === cardSeq) showCard(`${fightCardHtml(fight, null, false)}<div class="ewa-card-foot">Classes not loaded: ${esc(error.message)}</div>`);
+        return;
+      }
+    } else {
+      stat = await loadStatic().catch(() => null);
+    }
+    if (seq === cardSeq) showCard(fightCardHtml(fight, stat, false));
+  }
+
+  function wireCards(panel) {
+    panel.addEventListener("mousemove", event => {
+      cardMouse = { x: event.clientX, y: event.clientY };
+    }, { passive: true });
+
+    panel.addEventListener("mouseover", event => {
+      const name = event.target.closest(".ewa-pick, .ewa-fav");
+      const row = name ? null : event.target.closest(".ewa-fight[data-fid]");
+      const target = name || row;
+      if (target === cardTarget) return;
+      cardTarget = target;
+      hideCard();
+      if (!target) return;
+
+      cardMouse = { x: event.clientX, y: event.clientY };
+      const seq = cardSeq;
+      cardTimer = setTimeout(() => {
+        if (seq !== cardSeq) return;
+        if (name) {
+          showNameCard(name.dataset.player || name.dataset.fav || "", seq);
+          return;
+        }
+        const fight = fightById(row.dataset.fid);
+        if (fight) showFightCard(fight, seq);
+      }, name ? CARD_NAME_DELAY : CARD_ROW_DELAY);
+    });
+
+    const close = () => {
+      cardTarget = null;
+      hideCard();
+    };
+    panel.addEventListener("mouseleave", close);
+    panel.addEventListener("pointerdown", close, true);
+    const body = $("#ewa-body");
+    if (body) body.addEventListener("scroll", close, { passive: true });
+  }
+
+  // ---------------------------------------------------------------
+  // Back with the mouse's back button (side button)
+  // ---------------------------------------------------------------
+  // Every change of player, head-to-head, tab or analysis class is noted.
+  // The back button over the panel returns to the previous one instead of
+  // leaving the Eden page.
+
+  const NAV_MAX = 30;
+  const navStack = [];
+  let navMuted = 0;
+
+  function navState() {
+    const h2h = $("#ewa-h2h");
+    const body = $("#ewa-body");
+    return {
+      tab: currentTab,
+      player: viewPlayer,
+      h2h: h2h ? h2h.value.trim() : "",
+      sel: ana.sel ? { ...ana.sel } : null,
+      scroll: body ? body.scrollTop : 0
+    };
+  }
+
+  const sameNav = (a, b) => a.tab === b.tab
+    && normalizeName(a.player) === normalizeName(b.player)
+    && normalizeName(a.h2h) === normalizeName(b.h2h)
+    && JSON.stringify(a.sel) === JSON.stringify(b.sel);
+
+  function pushNav() {
+    if (navMuted) return;
+    const state = navState();
+    const top = navStack[navStack.length - 1];
+    if (top && sameNav(top, state)) return;
+    navStack.push(state);
+    if (navStack.length > NAV_MAX) navStack.shift();
+  }
+
+  // Several steps that count as one navigation
+  function navigate(steps) {
+    pushNav();
+    navMuted += 1;
+    try {
+      return steps();
+    } finally {
+      navMuted -= 1;
+    }
+  }
+
+  async function navBack() {
+    const now = navState();
+    let state = navStack.pop();
+    while (state && sameNav(state, now)) state = navStack.pop();
+    if (!state) return;
+
+    hideCard();
+    let pending = null;
+    navMuted += 1;
+    try {
+      ana.sel = state.sel;
+      const h2h = $("#ewa-h2h");
+      if (h2h) h2h.value = state.h2h;
+      showAllFights = false;
+      const playerChanged = normalizeName(state.player) !== normalizeName(viewPlayer);
+      if (playerChanged) setPlayer(state.player);
+
+      if (state.tab !== currentTab) showTab(state.tab); // draws the analysis by itself
+      else if (state.tab === "ana") pending = renderAnalysis();
+      if (state.tab === "fights") pending = playerChanged ? loadFeed() : Promise.resolve(calculate());
+      else if (playerChanged) loadFeed(); // fights tab in the background
+    } finally {
+      navMuted -= 1;
+    }
+    await pending;
+    const body = $("#ewa-body");
+    if (body) body.scrollTop = state.scroll;
+  }
+
+  function wireBackButton(panel) {
+    const isBack = event => event.button === 3 && panel.contains(event.target);
+    window.addEventListener("mousedown", event => {
+      if (isBack(event)) event.preventDefault();
+    }, true);
+    window.addEventListener("auxclick", event => {
+      if (isBack(event)) event.preventDefault();
+    }, true);
+    window.addEventListener("mouseup", event => {
+      if (!isBack(event)) return;
+      event.preventDefault();
+      event.stopPropagation();
+      navBack();
+    }, true);
   }
 
   // ---------------------------------------------------------------
@@ -1261,31 +1874,43 @@
     const span = stat.first && stat.last
       ? `${fmtDate(stat.first)} to ${fmtDate(stat.last)}`
       : "period unknown";
+    // The database sends at most the newest FEED.overviewLimit fights
+    const capped = feed.source === "db" && feed.capped;
+    const total = capped ? Math.max(feed.total, stat.total) : stat.total;
 
     return `
       <div class="ewa-sum">
-        <div class="ewa-sum-title">All loaded fights</div>
+        <div class="ewa-sum-title">${feed.source === "db" ? `${esc(periodLabel())} · ${esc(sizeLabel(sizeSel))}` : "Fights on this Eden page"}</div>
         <div class="ewa-sum-top">
-          <div class="ewa-sum-rate"><strong>${fmt(stat.total)}</strong><span>Fights</span></div>
+          <div class="ewa-sum-rate"><strong>${fmt(total)}</strong><span>Fights</span></div>
           <div class="ewa-sum-kv"><strong>${stat.average !== null ? fmtDuration(Math.round(stat.average)) : "-"}</strong><span>Ø time</span></div>
           <div class="ewa-sum-kv"><strong class="fast">${fmt(stat.fast)}</strong><span>Fast</span></div>
           <div class="ewa-sum-kv"><strong class="slow">${fmt(stat.slow)}</strong><span>Long</span></div>
         </div>
-        <div class="ewa-form"><span>Covers</span>${span}</div>
+        <div class="ewa-form"><span>Covers</span>${span}${capped ? ` · numbers below from the newest ${fmt(stat.total)}` : ""}</div>
         ${activityHtml(fights)}
       </div>
     `;
   }
 
+  // "All" on the slider means the whole season in the database
+  const periodLabel = () => (Number.isFinite(hoursValue()) ? hoursLabel(hoursValue()) : "Season");
+
+  const sizeLabel = size => (size === 1 ? "Solo" : size ? `Group of ${size}${size === MAX_GROUP ? "+" : ""}` : "All group sizes");
+
+  // Group size filter. Overview: fights where one side has this size.
+  // Player: fights where the player's own side has this size.
   function loadBarHtml() {
     const sizes = Array.from({ length: MAX_GROUP }, (_, index) => index + 1);
-    const { min, max } = currentRange();
-    const activeAll = min === 1 && max === MAX_GROUP;
+    const hint = size => (viewPlayer ? `Own group: ${sizeLabel(size)}` : `One side: ${sizeLabel(size)}`);
 
     return `
-      <div class="ewa-loadbar">
-        ${sizes.map(size => `<button class="ewa-load-btn ${!activeAll && min === size && max === size ? "is-on" : ""}" data-min="${size}" data-max="${size}">${size}v${size}</button>`).join("")}
-        <button class="ewa-load-btn is-reset ${activeAll ? "is-on" : ""}" data-min="1" data-max="${MAX_GROUP}">All</button>
+      <div class="ewa-sizebar">
+        <span class="ewa-time-label">Group</span>
+        <div class="ewa-loadbar">
+          ${sizes.map(size => `<button class="ewa-load-btn ${sizeSel === size ? "is-on" : ""}" data-size="${size}" title="${hint(size)}">${size === 1 ? "Solo" : size}</button>`).join("")}
+          <button class="ewa-load-btn is-reset ${sizeSel ? "" : "is-on"}" data-size="0" title="All group sizes">All</button>
+        </div>
       </div>
     `;
   }
@@ -1298,7 +1923,7 @@
       ${stat.sizes.length ? `
       <div class="ewa-bars">
         ${stat.sizes.map(entry => `
-          <div class="ewa-bar-row is-plain ewa-load" data-min="${entry.size}" data-max="${entry.size}" title="Load only ${entry.size}v${entry.size} from Eden">
+          <div class="ewa-bar-row is-plain ewa-load" data-size="${capSize(entry.size)}" title="Only fights with a side of ${capSize(entry.size)}${entry.size >= MAX_GROUP ? "+" : ""}">
             <span class="ewa-bar-name">${entry.label}</span>
             <div class="ewa-bar"><span style="width:${(entry.count / max * 100).toFixed(1)}%"></span></div>
             <span class="ewa-bar-val">${fmt(entry.count)}</span>
@@ -1434,7 +2059,7 @@
           const rate = total ? entry.wins / total * 100 : 0;
           return `
             <div class="ewa-opp">
-              <span class="ewa-opp-name ewa-pick" data-player="${esc(entry.name)}" title="Analyse this player">${realmMark(entry.realm)}${esc(entry.name)}</span>
+              <span class="ewa-opp-name ewa-pick" data-player="${esc(entry.name)}">${realmMark(entry.realm)}${esc(entry.name)}</span>
               <span class="ewa-opp-sub">${fmt1(rate)}% of ${total}</span>
               <span class="ewa-opp-val">${entry[mode]}</span>
             </div>
@@ -1456,10 +2081,10 @@
           const d = durationClass(secs, size);
           const time = secs !== null ? fmtDuration(secs) : esc(fight.duration || "-");
           return `
-            <a class="ewa-fight is-duel" href="/fights?id=${encodeURIComponent(String(fight.id).replace(/^fight_/, ""))}" target="_blank" rel="noopener" title="Open fight in a new tab">
+            <a class="ewa-fight is-duel" data-fid="${esc(fight.id)}" href="/fights?id=${encodeURIComponent(String(fight.id).replace(/^fight_/, ""))}" target="_blank" rel="noopener">
               <div class="ewa-fight-main">
-                <span class="ewa-fight-opp" title="${esc(fight.winners.join(", "))}"><i class="ewa-fight-res w">W</i>${realmMark(fight.winnerRealm)}<span class="ewa-namelist">${nameLinks(fight.winners) || "-"}</span></span>
-                <span class="ewa-fight-opp loser" title="${esc(fight.losers.join(", "))}"><i class="ewa-fight-res l">L</i>${realmMark(fight.loserRealm)}<span class="ewa-namelist">${nameLinks(fight.losers) || "-"}</span></span>
+                <span class="ewa-fight-opp"><i class="ewa-fight-res w">W</i>${realmMark(fight.winnerRealm)}<span class="ewa-namelist">${nameLinks(fight.winners) || "-"}</span></span>
+                <span class="ewa-fight-opp loser"><i class="ewa-fight-res l">L</i>${realmMark(fight.loserRealm)}<span class="ewa-namelist">${nameLinks(fight.losers) || "-"}</span></span>
               </div>
               <span class="ewa-dur ${d.cls}" title="${esc(d.hint)}">${time}</span>
               <div class="ewa-fight-meta">
@@ -1483,13 +2108,11 @@
 
   function renderOverview(fights) {
     const stat = overviewStats(fights);
-    const range = currentRange();
-    const single = range.min === range.max; // exactly one matchup selected
 
     $("#ewa-output").innerHTML = `
       ${overviewHeadHtml(stat, fights)}
-      ${single ? "" : matchupHtml(stat)}
-      ${single && range.min === 1 ? "" : groupsHtml(groupStats(fights), "Recurring groups")}
+      ${sizeSel ? "" : matchupHtml(stat)}
+      ${sizeSel === 1 ? "" : groupsHtml(groupStats(fights), "Recurring groups")}
 
       <div class="ewa-opponents">
         <div class="ewa-opp-col is-win">
@@ -1548,7 +2171,7 @@
     return { bestW, bestL };
   }
 
-  function summaryHtml(rows, title) {
+  function summaryHtml(rows, title, actions = "") {
     const wins = rows.filter(row => row.result === "Win").length;
     const total = rows.length;
     const rate = total ? wins / total * 100 : 0;
@@ -1559,7 +2182,7 @@
 
     return `
       <div class="ewa-sum">
-        ${title ? `<div class="ewa-sum-title">${esc(title)}</div>` : ""}
+        ${title ? `<div class="ewa-sum-title"><span>${esc(title)}</span>${actions}</div>` : ""}
         <div class="ewa-sum-top">
           <div class="ewa-sum-rate"><strong>${fmt1(rate)}%</strong><span>Winrate</span></div>
           <div class="ewa-sum-kv"><strong>${total}</strong><span>Fights</span></div>
@@ -1573,14 +2196,14 @@
     `;
   }
 
-  // The period slider is narrower than the loaded data reaches.
+  // Period or group size leave nothing over.
   function emptyWindowHtml(loaded) {
     const newest = newestDate(loaded);
     const ageHours = newest ? (Date.now() - newest.getTime()) / HOUR : null;
 
     return `
       <div class="ewa-sum">
-        <div class="ewa-sum-title">Nothing in this period</div>
+        <div class="ewa-sum-title">Nothing in this selection</div>
         <div class="ewa-form">
           <span>Loaded</span>${fmt(loaded.length)} fights${newest ? `, newest ${ageHours < 1 ? "under 1" : Math.round(ageHours)} h ago` : ""}
         </div>
@@ -1590,7 +2213,7 @@
   }
 
   // Every player name in the panel opens that player's view on click.
-  const nameLink = name => `<span class="ewa-pick" data-player="${esc(name)}" title="Show ${esc(name)}">${esc(name)}</span>`;
+  const nameLink = name => `<span class="ewa-pick" data-player="${esc(name)}">${esc(name)}</span>`;
   const nameLinks = names => names.map(nameLink).join(", ");
 
   function realmMark(realm) {
@@ -1618,11 +2241,11 @@
     return `
       <div class="ewa-fights">
         ${rows.map(row => `
-          <a class="ewa-fight ${row.result === "Win" ? "is-win" : "is-loss"}" href="/fights?id=${encodeURIComponent(String(row.id).replace(/^fight_/, ""))}" target="_blank" rel="noopener" title="Open fight in a new tab">
+          <a class="ewa-fight ${row.result === "Win" ? "is-win" : "is-loss"}" data-fid="${esc(row.id)}" href="/fights?id=${encodeURIComponent(String(row.id).replace(/^fight_/, ""))}" target="_blank" rel="noopener">
             <span class="ewa-fight-res">${row.result === "Win" ? "W" : "L"}</span>
             <div class="ewa-fight-main">
-              <span class="ewa-fight-opp" title="${esc(row.opponentsForStats.join(", "))}">${realmMark(row.opponentRealm)}<span class="ewa-namelist">${nameLinks(row.opponentsForStats) || "-"}</span></span>
-              ${row.teammates.length ? `<span class="ewa-fight-mates" title="${esc(row.teammates.join(", "))}">with <span class="ewa-namelist">${nameLinks(row.teammates)}</span></span>` : ""}
+              <span class="ewa-fight-opp">${realmMark(row.opponentRealm)}<span class="ewa-namelist">${nameLinks(row.opponentsForStats) || "-"}</span></span>
+              ${row.teammates.length ? `<span class="ewa-fight-mates">with <span class="ewa-namelist">${nameLinks(row.teammates)}</span></span>` : ""}
             </div>
             ${(() => {
               const d = durationClass(row.seconds, row.fightSize || row.size);
@@ -1662,7 +2285,7 @@
               <span class="ewa-h2h-foe">${esc(h2hName)}</span>
             </div>
             <div class="ewa-h2h-act">
-              <button class="ewa-load-btn ewa-search-name" data-player="${esc(h2hName)}" title="Search ${esc(h2hName)} on the Eden page">Search ${esc(h2hName)}</button>
+              <button class="ewa-load-btn ewa-search-name" data-player="${esc(h2hName)}" title="Show all fights of ${esc(h2hName)}">Open ${esc(h2hName)}</button>
               <button class="ewa-load-btn" id="ewa-h2h-clear" title="Remove the head-to-head">Clear</button>
             </div>
           </div>
@@ -1674,7 +2297,11 @@
     }
 
     output.innerHTML = `
-      ${summaryHtml(rows, player)}
+      ${summaryHtml(rows, player, `
+        <span class="ewa-sum-acts">
+          ${starHtml(player)}
+          <button class="ewa-mini" id="ewa-copy-player" title="Copy a short summary, e.g. for Discord">Copy</button>
+        </span>`)}
 
       ${sizesHtml(rows)}
 
@@ -2835,7 +3462,7 @@
     idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
     dailyLimit: 40000,          // requests to Eden per day, about one every 2 s around the clock
-    listEveryMs: 20 * MINUTE,   // the general list holds the latest 500 fights
+    listEveryMs: MINUTE,        // the general list (latest 500 fights) first, so new fights show up within a minute
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
     maxPauseMs: 2 * HOUR,
     dbPauseMs: 2 * MINUTE,      // pause after a database error
@@ -2939,6 +3566,7 @@
     const res = (await sbRpc("submit_fights", { p_token: token, p_fights: entries })) || {};
     await sbRpc("mark_list_poll", { p_token: token });
     collectSave({ lastList: Date.now() });
+    if (res.inserted) feed.at = 0; // the open fights tab reloads at its next check
     collectInfo(`List: ${fmt(res.inserted)} new, ${fmt(res.known)} known${res.rejected ? `, ${fmt(res.rejected)} rejected` : ""}`);
   }
 
@@ -3563,7 +4191,7 @@
     return `
       <div class="ewa-ana-grid">
         ${sortHeadHtml("pl", "Player")}
-        ${rows.map(r => rowHtml(r, "", `data-ana-player="${esc(r.label)}" title="Search ${esc(r.label)} on the Eden page"`)).join("")}
+        ${rows.map(r => rowHtml(r, "", `data-ana-player="${esc(r.label)}" title="Show the fights of ${esc(r.label)}"`)).join("")}
       </div>
       ${!ana.showAllPlayers && list.length > rows.length
         ? `<button class="ewa-more-btn" id="ewa-ana-more">Show all ${fmt(list.length)} players</button>`
@@ -3760,9 +4388,10 @@
     const selName = ana.sel ? (stat.classes[ana.sel.cls] || `Class ${ana.sel.cls}`) : "";
     const key = anaPlayersKey();
 
+    ana.copy = { entries, classes: stat.classes, win: win.label };
     out.innerHTML = `
       <div class="ewa-sum">
-        <div class="ewa-sum-title">Classes · ${win.label}</div>
+        <div class="ewa-sum-title"><span>Classes · ${win.label}</span><span class="ewa-sum-acts"><button class="ewa-mini" id="ewa-copy-ana" title="Copy the table as short text, e.g. for Discord">Copy</button></span></div>
         <div class="ewa-sum-top">
           <div class="ewa-sum-rate"><strong>${fmt(fights)}</strong><span>Fights, ${ana.size === 1 ? "solo" : ana.size ? `${ana.size}v${ana.size}` : "all sizes"}</span></div>
           <div class="ewa-sum-kv"><strong>${fmt(entries.length)}</strong><span>Classes</span></div>
@@ -3888,7 +4517,14 @@
     const hit = selector => t.closest(selector);
 
     const tab = hit(".ewa-tab");
-    if (tab) { showTab(tab.dataset.tab); return true; }
+    if (tab) {
+      if (tab.dataset.tab !== currentTab) pushNav();
+      showTab(tab.dataset.tab);
+      return true;
+    }
+
+    const copy = hit("#ewa-copy-ana");
+    if (copy) { copyText(anaCopyText(), copy); return true; }
 
     const win = hit("[data-ana-win]");
     if (win) { ana.win = Number(win.dataset.anaWin); ana.showAllPlayers = false; renderAnalysis(); return true; }
@@ -3919,8 +4555,10 @@
 
     const player = hit("[data-ana-player]");
     if (player) {
-      showTab("fights");
-      searchPlayer(player.dataset.anaPlayer);
+      navigate(() => {
+        showTab("fights");
+        searchPlayer(player.dataset.anaPlayer);
+      });
       return true;
     }
 
@@ -3928,6 +4566,7 @@
     if (cls) {
       const pick = { cls: Number(cls.dataset.anaCls), realm: Number(cls.dataset.anaCrealm) };
       const same = ana.sel && ana.sel.cls === pick.cls && ana.sel.realm === pick.realm;
+      pushNav();
       ana.sel = same ? null : pick;
       ana.scrollToSel = !same;
       ana.showAllPlayers = false;
@@ -4016,6 +4655,60 @@
       .ewa-kv { display: grid; grid-template-columns: 130px 1fr; gap: 3px 10px; font-size: 11.5px; }
       .ewa-kv span { color: var(--faint); }
       .ewa-kv b { font-weight: 400; color: var(--text); }
+
+      /* Group size row, favorites */
+      .ewa-sizebar, .ewa-favs { display: flex; align-items: center; gap: 10px; }
+      .ewa-sizebar .ewa-time-label, .ewa-favs .ewa-time-label, .ewa-time .ewa-time-label { width: 54px; flex: none; }
+      #ewa-panel .ewa-sizebar .ewa-time-label, #ewa-panel .ewa-favs .ewa-time-label { padding-top: 0; }
+      .ewa-fav-list { display: flex; flex-wrap: wrap; gap: 5px; }
+      .ewa-fav {
+        display: inline-flex; align-items: center; gap: 3px; padding: 3px 4px 3px 9px;
+        border: 1px solid var(--edge); border-radius: 99px; background: #1e2126;
+        color: var(--muted); font-size: 11.5px; line-height: 1.2; cursor: pointer; user-select: none;
+      }
+      .ewa-fav:hover { color: var(--parch); border-color: var(--bronze); }
+      .ewa-fav.is-on { color: var(--ink); background: var(--bronze); border-color: var(--parch-2); font-weight: 700; }
+      .ewa-fav i {
+        font-style: normal; width: 15px; height: 15px; line-height: 14px; text-align: center;
+        border-radius: 99px; opacity: 0; font-size: 12px;
+      }
+      .ewa-fav:hover i { opacity: .6; }
+      .ewa-fav i:hover { opacity: 1; background: rgba(0, 0, 0, .25); }
+
+      /* Small buttons in a summary title */
+      .ewa-sum-title { display: flex; align-items: center; gap: 8px; }
+      .ewa-sum-acts { margin-left: auto; display: flex; gap: 5px; }
+      #ewa-panel button.ewa-mini {
+        padding: 4px 9px; font-size: 11px !important; background: #1e2126; color: var(--muted);
+      }
+      #ewa-panel button.ewa-mini:hover { color: var(--parch); }
+      #ewa-panel button.ewa-star { font-size: 13px !important; padding: 2px 7px; }
+      #ewa-panel button.ewa-star.is-on { color: #e2cc6a; border-color: #8f7f3e; }
+
+      /* Hover card */
+      #ewa-card {
+        position: fixed; z-index: 2147483647; min-width: 210px; max-width: 400px;
+        padding: 9px 11px 8px; background: #2b2f35; border: 1px solid var(--edge); border-radius: 4px;
+        box-shadow: 0 10px 30px rgba(0, 0, 0, .55); font-size: 12px; line-height: 1.45;
+        pointer-events: none; color: var(--text);
+      }
+      .ewa-card-head { display: flex; align-items: center; gap: 6px; font-size: 13.5px; }
+      .ewa-card-class { display: flex; align-items: center; gap: 5px; margin: 2px 0 7px; color: var(--muted); }
+      .ewa-card-class span { color: var(--role); }
+      .ewa-card-class em { font-style: normal; color: var(--faint); margin-left: 3px; }
+      .ewa-card-row { display: grid; grid-template-columns: minmax(0, 1fr) auto 50px; gap: 12px; padding: 1px 0; }
+      .ewa-card-row span { color: var(--faint); white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ewa-card-row b { font-weight: 600; font-variant-numeric: tabular-nums; }
+      .ewa-card-row i { font-style: normal; font-weight: 700; text-align: right; font-variant-numeric: tabular-nums; }
+      #ewa-card em.w { font-style: normal; color: var(--win); }
+      #ewa-card em.l { font-style: normal; color: var(--loss); }
+      .ewa-card-sub { display: flex; align-items: center; gap: 5px; margin: 7px 0 2px; font-size: 10px; font-weight: 600; letter-spacing: .7px; color: var(--bronze); }
+      .ewa-card-foot { margin-top: 6px; font-size: 10.5px; color: var(--faint); }
+      .ewa-card-fight { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+      .ewa-card-fight .ewa-card-sub { margin-top: 0; }
+      .ewa-card-pl { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
+      .ewa-card-pl span { overflow: hidden; text-overflow: ellipsis; }
+      .ewa-card-pl em { font-style: normal; font-size: 11px; color: var(--role); margin-left: auto; padding-left: 8px; }
   `;
 
   // ---------------------------------------------------------------
@@ -4082,10 +4775,11 @@
             <input id="ewa-h2h" type="text" placeholder="Opponent (optional)">
           </label>
         </div>
+        <div class="ewa-row ewa-favs" id="ewa-favs" hidden></div>
         `}
         <div class="ewa-row ewa-buttons">
           <button id="ewa-analyze">${buttonLabel}</button>
-          ${detail ? "" : `<button id="ewa-refresh" title="Reload the fight list with the current settings">Refresh</button>`}
+          ${detail ? "" : `<button id="ewa-refresh" title="Read Eden's newest fights now and reload">Refresh</button>`}
           ${detail ? "" : `<button id="ewa-reset" title="Clear the name, all group sizes, full period">Reset</button>`}
         </div>
         ${detail ? "" : `<div class="ewa-row" id="ewa-matchups"></div>`}
@@ -4594,16 +5288,19 @@
         rememberHours(hourIndex);
         renderTicks();
         clearTimeout(hourTimer);
-        hourTimer = setTimeout(calculate, 120);
+        hourTimer = setTimeout(onFilterChange, 120);
       });
     }
 
-    // A search on the Eden page means a fresh set of data.
+    // A search on the Eden page itself: its rows are a fresh set (only
+    // used without the database), and a name there opens that player here.
     const siteButton = document.querySelector("#search_button2");
     if (siteButton) {
       siteButton.addEventListener("click", () => {
         resetCollected();
         updateCacheLabel();
+        const name = getSiteSearchValue();
+        if (name && normalizeName(name) !== normalizeName(viewPlayer)) searchPlayer(name);
       }, true);
     }
 
@@ -4623,13 +5320,40 @@
       }
 
       if (event.target.closest("#ewa-time-off")) {
+        sizeSel = 0;
+        sessionSet(SIZE_KEY, 0);
+        renderLoadBar();
         setHourIndex(HOUR_STEPS.length - 1);
         return;
       }
 
       const load = event.target.closest(".ewa-load, .ewa-load-btn");
-      if (load && load.dataset.min !== undefined) {
-        loadMatchup(Number(load.dataset.min), Number(load.dataset.max));
+      if (load && load.dataset.size !== undefined) {
+        setSize(Number(load.dataset.size));
+        return;
+      }
+
+      const star = event.target.closest("[data-star]");
+      if (star) {
+        toggleFav(star.dataset.star);
+        return;
+      }
+
+      const favDel = event.target.closest("[data-fav-del]");
+      if (favDel) {
+        toggleFav(favDel.dataset.favDel);
+        return;
+      }
+
+      const fav = event.target.closest("[data-fav]");
+      if (fav) {
+        searchPlayer(fav.dataset.fav);
+        return;
+      }
+
+      const copyPlayer = event.target.closest("#ewa-copy-player");
+      if (copyPlayer) {
+        copyText(playerCopyText(), copyPlayer);
         return;
       }
 
@@ -4685,9 +5409,12 @@
       });
     }
 
+    // A name typed on the Eden page before the panel was there is taken over
+    if (!viewPlayer && getSiteSearchValue()) setPlayer(getSiteSearchValue());
+
     const playerInput = $("#ewa-player");
     if (playerInput) {
-      playerInput.value = getSiteSearchValue();
+      playerInput.value = viewPlayer;
       playerInput.addEventListener("keydown", event => {
         if (event.key === "Enter") {
           event.preventDefault();
@@ -4730,8 +5457,9 @@
           const before = collected.size;
           harvest();
           updateCacheLabel();
-          // The table was empty when the panel last drew and has rows now
-          if (!before && collected.size && !reloadPoll) calculate();
+          // Without the database: the table was empty when the panel last
+          // drew and has rows now
+          if (feed.source === "eden" && !before && collected.size && !reloadPoll) calculate();
         }, 150);
       });
 
@@ -4739,13 +5467,19 @@
     }
 
     updateCacheLabel();
-
-    // Eden fills the table after the page has loaded. Once it is there,
-    // run once by itself so the overview shows up without a click.
     renderLoadBar();
-    afterTableReload(null, "fights", 1);
+    renderFavs();
+    loadFeed();
 
     showTab(currentTab);
+
+    wireCards(panel);
+    wireBackButton(panel);
+    const touched = () => { lastInteraction = Date.now(); };
+    panel.addEventListener("pointerdown", touched, true);
+    panel.addEventListener("keydown", touched, true);
+    panel.addEventListener("wheel", touched, { passive: true });
+    setInterval(autoRefreshTick, FEED.autoCheckMs);
 
     // Data collection in the background, only on the fight list
     runCollector();
