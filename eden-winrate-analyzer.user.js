@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.93
+// @version      0.94
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.93";
+  const VERSION = "0.94";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -4121,6 +4121,7 @@
   const ANA_REALMS = [[0, "All"], [1, "Alb"], [2, "Mid"], [3, "Hib"]];
   const ANA_MIN_FIGHTS = 20;     // greyed out below
   const ANA_PLAYER_LIMIT = 30;
+  const ANA_PLAYER_MIN_FIGHTS = 10; // players greyed out below (or below the lower quartile, whichever is higher)
   const ANA_CACHE_MS = 5 * MINUTE;
   const ANA_INFO_MS = MINUTE;
   const ANA_VS_MIN_FIGHTS = 10;  // opponent classes greyed out below
@@ -4253,20 +4254,39 @@
     `;
   }
 
+  // Lower quartile of a list of numbers (linear interpolation)
+  function lowerQuartile(values) {
+    if (!values.length) return 0;
+    const sorted = [...values].sort((a, b) => a - b);
+    const pos = (sorted.length - 1) * 0.25;
+    const low = Math.floor(pos);
+    return sorted[low] + (sorted[Math.min(low + 1, sorted.length - 1)] - sorted[low]) * (pos - low);
+  }
+
+  // Players count for the win rate from ANA_PLAYER_MIN_FIGHTS fights and
+  // above the lower quartile of fights in this list. Below that they are
+  // greyed out and go to the bottom when sorting by win rate.
+  function playerMinFights(rows) {
+    return Math.max(ANA_PLAYER_MIN_FIGHTS, Math.ceil(lowerQuartile(rows.map(row => row.total))));
+  }
+
   function anaPlayersHtml(list) {
     if (!list) return `<div class="ewa-muted">Loading players ...</div>`;
     if (!list.length) return `<div class="ewa-muted">No players found.</div>`;
-    const sorted = sortRows(list.map(p => ({ ...withRate(p), label: p.name })), "pl", 0);
+    const all = list.map(p => ({ ...withRate(p), label: p.name }));
+    const minFights = playerMinFights(all);
+    const sorted = sortRows(all, "pl", minFights);
     const rows = ana.showAllPlayers ? sorted : sorted.slice(0, ANA_PLAYER_LIMIT);
 
     return `
       <div class="ewa-ana-grid">
         ${sortHeadHtml("pl", "Player")}
-        ${rows.map(r => rowHtml(r, "", `data-ana-player="${esc(r.label)}" title="Show the fights of ${esc(r.label)}"`)).join("")}
+        ${rows.map(r => rowHtml(r, r.total < minFights ? "is-thin" : "", `data-ana-player="${esc(r.label)}" title="Show the fights of ${esc(r.label)}"`)).join("")}
       </div>
       ${!ana.showAllPlayers && list.length > rows.length
         ? `<button class="ewa-more-btn" id="ewa-ana-more">Show all ${fmt(list.length)} players</button>`
         : ""}
+      <div class="ewa-ana-note">Greyed out below ${minFights} fights: at least ${ANA_PLAYER_MIN_FIGHTS}, more when the lower quartile of this list is higher. Greyed out players go to the bottom when sorting by win rate.</div>
     `;
   }
 
