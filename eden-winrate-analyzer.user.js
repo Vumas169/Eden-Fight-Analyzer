@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.89
+// @version      0.90
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.89";
+  const VERSION = "0.90";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -2545,11 +2545,68 @@
   // One request to Eden. Every way it can fail (network, timeout, HTTP
   // error, unreadable answer) ends as an Eden error, so the collector
   // pauses with the right reason. 404 is a normal answer: fight gone.
+  // ---------------------------------------------------------------
+  // Request log, to learn how Eden's rate limit works
+  // ---------------------------------------------------------------
+  // Every collector request to Eden is noted with time, kind, status and
+  // duration. Headers that may describe the limit are kept for errors and
+  // for the first good answer. The log goes to the database in batches;
+  // until the database accepts it, the latest RATE_LOG_MAX entries stay here.
+  const RATE_LOG_MAX = 2000;
+  const RATE_LOG_BATCH = 200;
+  const RATE_LOG_RETRY_MS = 10 * MINUTE;
+  const RATE_HEADER = /rate|retry|limit|quota|server|cf-|x-cache|age/i;
+  const rateLog = [];
+  let rateLogSending = false;
+  let rateLogFailedAt = 0;
+  let sampledOkHeaders = false;
+
+  function requestKind(url) {
+    if (url.includes("fights/list")) return "list";
+    if (url.includes("fights/player")) return "player";
+    if (url.includes("fight.php")) return "fight";
+    return "other";
+  }
+
+  function logEdenRequest(url, status, startedAt, response) {
+    const entry = { t: startedAt, k: requestKind(url), s: status, ms: Date.now() - startedAt };
+    const wantHeaders = response && (status >= 400 || !sampledOkHeaders);
+    if (wantHeaders) {
+      const h = {};
+      response.headers.forEach((value, name) => {
+        if (RATE_HEADER.test(name)) h[name] = String(value).slice(0, 200);
+      });
+      if (Object.keys(h).length) entry.h = h;
+      if (status < 400) sampledOkHeaders = true;
+    }
+    rateLog.push(entry);
+    if (rateLog.length > RATE_LOG_MAX) rateLog.splice(0, rateLog.length - RATE_LOG_MAX);
+  }
+
+  async function flushRateLog(token) {
+    if (rateLogSending || !token || rateLog.length < RATE_LOG_BATCH) return;
+    if (Date.now() - rateLogFailedAt < RATE_LOG_RETRY_MS) return;
+    rateLogSending = true;
+    const batch = rateLog.slice(0, RATE_LOG_BATCH);
+    try {
+      await sbRpc("submit_rate_log", { p_token: token, p_events: batch });
+      rateLog.splice(0, batch.length);
+    } catch (error) {
+      rateLogFailedAt = Date.now(); // e.g. the database function is not there yet
+    } finally {
+      rateLogSending = false;
+    }
+  }
+
   async function edenFetchJson(url, headers) {
     const controller = new pageWindow.AbortController();
     const timer = setTimeout(() => controller.abort(), EDEN_TIMEOUT);
+    const startedAt = Date.now();
+    let logged = false;
     try {
       const response = await pageWindow.fetch(url, { credentials: "same-origin", headers, signal: controller.signal });
+      logEdenRequest(url, response.status, startedAt, response);
+      logged = true;
       if (response.status === 404) return { notFound: true };
       const text = await response.text();
       if (!response.ok) {
@@ -2560,6 +2617,7 @@
       }
       return parseEdenJson(text);
     } catch (error) {
+      if (!logged) logEdenRequest(url, error.name === "AbortError" ? 1 : 0, startedAt, null); // 1 = timeout, 0 = network
       if (error.eden) throw error;
       throw edenError(error.name === "AbortError" ? "Eden does not answer" : "Eden not reachable or unreadable answer");
     } finally {
@@ -3117,6 +3175,7 @@
       const started = Date.now();
       try {
         await collectorTick();
+        flushRateLog(getToken());
       } catch (error) {
         // collectorTick handles its own errors, this is only a safety net
       }
