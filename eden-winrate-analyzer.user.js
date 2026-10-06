@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.92
+// @version      0.93
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.92";
+  const VERSION = "0.93";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -830,22 +830,13 @@
     body.scrollTop += box.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
   }
 
-  // Asks the collector for Eden's list right away, waits a moment for it
-  // and loads the fights again. When nothing collects in this browser, it
-  // only reloads from the database (other users keep it up to date).
+  // Refresh: the newest fights straight from Eden (the shown player's list
+  // or Eden's general list), then everything again from the database.
   async function refreshList() {
-    const state = collectState();
-    const collecting = !!getToken() && state.enabled && Date.now() >= state.pauseUntil && state.count < COLLECT.dailyLimit;
     setStatus("Loading new fights ...");
-    if (collecting) {
-      const asked = Date.now();
-      collectSave({ lastList: 0 });
-      while (Date.now() - asked < FEED.listWaitMs && collectState().lastList < asked) {
-        await pageSleep(400);
-      }
-    }
     feedCache.clear();
-    return loadFeed({ force: true });
+    await freshFromEden({ force: true });
+    return loadFeed({ force: true, silent: true });
   }
 
   // Back to the start: no name, every group size, full period.
@@ -1022,7 +1013,9 @@
     idleMs: 20 * SECOND,     // ... but only this long after the last click or scroll in the panel
     autoCheckMs: 10 * SECOND,
     debounceMs: 250,
-    listWaitMs: 8 * SECOND   // Refresh waits this long for the collector to read Eden's list
+    edenEveryMs: MINUTE,     // a player or the list is fetched from Eden at most this often (Refresh always)
+    listFreshMs: 2 * MINUTE, // Eden's list read this recently: new fights are in the database already
+    edenKeepMs: 30 * MINUTE  // fights fetched from Eden are shown this long, even before the database has them
   };
   const PLAYER_KEY = "ewa_player";
   const SIZE_KEY = "ewa_size";
@@ -1036,7 +1029,8 @@
 
   const feed = { key: "", source: "", fights: [], byId: new Map(), total: 0, capped: false, lastPoll: "", at: 0 };
   const feedCache = new Map();
-  const crawledNow = new Set();
+  const edenExtra = new Map();     // "p|name" or "o" -> { t, fights } fetched from Eden directly
+  const edenFetchedAt = new Map(); // same keys -> time of the last fetch
   let feedReq = 0;
   let feedTimer = null;
   let lastInteraction = 0;
@@ -1065,6 +1059,47 @@
   }
 
   const fightById = id => feed.byId.get(id) || collected.get(id) || null;
+
+  // Fight ids count Berlin wall-clock seconds since 1 Sep 2023 00:00
+  const BERLIN_PARTS = new Intl.DateTimeFormat("en-GB", {
+    timeZone: "Europe/Berlin", hourCycle: "h23",
+    year: "numeric", month: "2-digit", day: "2-digit", hour: "2-digit", minute: "2-digit", second: "2-digit"
+  });
+
+  function idUnixSeconds(id) {
+    const wall = Date.UTC(2023, 8, 1) + parseInt(id, 36) * SECOND; // Berlin time read as if it were UTC
+    const parts = BERLIN_PARTS.formatToParts(new Date(wall));
+    const get = type => Number((parts.find(part => part.type === type) || {}).value || 0);
+    const shown = Date.UTC(get("year"), get("month") - 1, get("day"), get("hour"), get("minute"), get("second"));
+    return Math.round((wall - (shown - wall)) / SECOND); // minus Berlin's offset at that time
+  }
+
+  // A fight from Eden's list or player list, same shape as from the database
+  function fightFromEden(entry) {
+    const e = dbEntry(entry);
+    if (!/^[0-9a-z]{1,10}$/.test(e.id) || !e.w.length || !e.l.length) return null;
+    const m = String(e.m || "").match(/^(\d+)v(\d+)$/); // winners first
+    return fightFromDb([e.id, idUnixSeconds(e.id), m ? Number(m[1]) : e.w.length, m ? Number(m[2]) : e.l.length,
+      Number(e.wr), Number(e.lr), e.d, e.w, e.l]);
+  }
+
+  const extraKey = key => (key.startsWith("p|") ? key : "o");
+
+  // Database fights plus what was just fetched from Eden and is not in the
+  // database yet (the database may refuse or lag behind).
+  function withEden(key, fights) {
+    const extra = edenExtra.get(extraKey(key));
+    if (!extra || Date.now() - extra.t > FEED.edenKeepMs) return fights;
+    const known = new Set(fights.map(fight => fight.id));
+    const add = extra.fights.filter(fight => !known.has(fight.id));
+    return add.length ? [...fights, ...add].sort((a, b) => b.date - a.date) : fights;
+  }
+
+  function setFeedFights(base) {
+    feed.base = base;
+    feed.fights = withEden(feed.key, base);
+    feed.byId = new Map(feed.fights.map(fight => [fight.id, fight]));
+  }
 
   function setPlayer(name) {
     viewPlayer = capitalize(String(name || "").trim());
@@ -1115,16 +1150,15 @@
     Object.assign(feed, {
       key,
       source: "db",
-      fights: entry.fights,
-      byId: entry.byId,
       total: entry.total,
       capped: entry.capped,
       lastPoll: entry.lastPoll,
       at: entry.t
     });
+    setFeedFights(entry.fights);
     if (!before) return true;
     const first = list => (list[0] ? list[0].id : "");
-    return before.length !== entry.fights.length || first(before) !== first(entry.fights);
+    return before.length !== feed.fights.length || first(before) !== first(feed.fights);
   }
 
   // Redraw without jumping: the panel keeps its scroll position
@@ -1188,7 +1222,15 @@
     else if (changed) redrawKeepingScroll();
     else updateCacheLabel();
 
-    if (player && data && !data.crawled) crawlPlayer(data.name || player);
+    // Opening a player always asks Eden for his newest fights (one request,
+    // the same as a search on the Eden page). The overview only does so
+    // when nobody has read Eden's list recently.
+    if (!silent && (player || !listIsFresh())) freshFromEden();
+  }
+
+  function listIsFresh() {
+    const polled = Math.max(collectState().lastList || 0, feed.lastPoll ? Date.parse(feed.lastPoll) || 0 : 0);
+    return Date.now() - polled < FEED.listFreshMs;
   }
 
   function useEdenPage(message) {
@@ -1200,38 +1242,56 @@
     collectInfo(`Fights tab: database not reachable (${message})`);
   }
 
-  // A player whose own list was never fetched may miss older fights in the
-  // database. It is fetched once now: one request to Eden, the same as a
-  // search on the Eden page, and stored for everybody.
-  async function crawlPlayer(name) {
-    const key = normalizeName(name);
-    if (!key || crawledNow.has(key)) return;
-    crawledNow.add(key);
-
-    // Collecting switched off, or Eden asked for a break: no request
+  // Newest fights straight from Eden: the shown player's list, or Eden's
+  // general list in the overview. They are shown at once and stored in the
+  // database for everybody. force: Refresh, ignores the once-a-minute rule.
+  async function freshFromEden(options = {}) {
+    const { force = false } = options;
+    const player = viewPlayer;
+    const key = player ? `p|${normalizeName(player)}` : "o";
+    if (!force && Date.now() - (edenFetchedAt.get(key) || 0) < FEED.edenEveryMs) return;
     const state = collectState();
-    if (!state.enabled || Date.now() < state.pauseUntil) return;
-    const token = getToken() || await ensureToken();
-    if (!token) return;
+    if (!force && Date.now() < state.pauseUntil && Date.now() - state.lastLimitAt < COLLECT.afterLimitHoldMs) return; // Eden asked for a break
+    edenFetchedAt.set(key, Date.now());
 
-    const stillShown = () => normalizeName(viewPlayer) === key;
-    if (stillShown()) setStatus(`Fetching older fights of ${name} from Eden ...`);
+    const stillShown = () => (viewPlayer ? `p|${normalizeName(viewPlayer)}` : "o") === key;
+    if (force || player) setStatus(player ? `Loading the newest fights of ${player} from Eden ...` : "Loading the newest fights from Eden ...");
+
+    let data;
     try {
       collectSave({ count: collectState().count + 1, lastEdenAt: Date.now() });
-      const data = await edenJson(PLAYER_URL(name, 0));
-      const entries = data.notFound ? [] : edenEntries(data).map(dbEntry);
-      let inserted = 0;
-      if (entries.length) {
-        const res = (await sbRpc("submit_fights", { p_token: token, p_fights: entries })) || {};
-        inserted = res.inserted || 0;
-      }
-      await sbRpc("report_crawl", { p_token: token, p_name: name, p_size: 0, p_count: entries.length });
-      if (!stillShown()) return;
-      if (inserted) await loadFeed({ force: true, silent: true });
-      setStatus("");
+      data = await edenJson(player ? PLAYER_URL(player, 0) : LIST_URL);
     } catch (error) {
       if (error.eden && error.status === 429) handleCollectError(error); // the collector slows down as well
-      if (stillShown()) setStatus(`Older fights of ${name} not loaded (${error.message}).`);
+      if (stillShown()) setStatus(`Eden did not answer (${error.message}), showing the database.`);
+      return;
+    }
+
+    const raw = data.notFound ? [] : edenEntries(data);
+    edenExtra.set(key, { t: Date.now(), fights: raw.map(fightFromEden).filter(Boolean) });
+    if (stillShown() && feed.source === "db") {
+      const before = feed.fights.length;
+      setFeedFights(feed.base || []);
+      if (feed.fights.length !== before) redrawKeepingScroll();
+      setStatus("");
+    } else if (stillShown()) {
+      setStatus("");
+    }
+
+    // Store them for everybody. If the database refuses, they stay visible here.
+    const token = getToken() || await ensureToken();
+    if (!token || !raw.length) return;
+    try {
+      const res = (await sbRpc("submit_fights", { p_token: token, p_fights: raw.map(dbEntry) })) || {};
+      if (player) {
+        await sbRpc("report_crawl", { p_token: token, p_name: player, p_size: 0, p_count: raw.length });
+      } else {
+        await sbRpc("mark_list_poll", { p_token: token });
+        collectSave({ lastList: Date.now() });
+      }
+      if (res.inserted) feedCache.clear();
+    } catch (error) {
+      collectInfo(`Database: ${error.message}`);
     }
   }
 
@@ -1245,6 +1305,9 @@
     if (currentTab !== "fights" || !panelOpen() || document.hidden) return;
     if (Date.now() - lastInteraction < FEED.idleMs || cardVisible()) return;
     if (Date.now() - feed.at < FEED.autoMs) return;
+    // Without a fresh read of Eden's list (collector stopped, paused or
+    // at its limit) the newest fights come from Eden directly.
+    if (!listIsFresh()) freshFromEden();
     loadFeed({ force: true, silent: true });
   }
 
@@ -3499,7 +3562,8 @@
       lastLimitAt: Math.min(s.lastLimitAt || 0, Date.now()), // a clock set back must not hold the floor
       lastSpeedAt: Math.min(s.lastSpeedAt || 0, Date.now()),
       okInRow: Math.min(s.okInRow || 0, COLLECT.speedUpAfter),
-      lastEdenAt: Math.min(s.lastEdenAt || 0, Date.now())
+      lastEdenAt: Math.min(s.lastEdenAt || 0, Date.now()),
+      jobsPauseUntil: s.jobsPauseUntil || 0
     };
   }
 
@@ -3561,6 +3625,9 @@
     countEdenRequest();
     const data = await edenJson(LIST_URL);
     if (data.notFound) throw edenError("List not found");
+    // Noted before the database step: a refused upload must not make the
+    // next step ask Eden for the list again right away.
+    collectSave({ lastList: Date.now() });
     const entries = edenEntries(data).map(dbEntry);
     heartbeat();
     const res = (await sbRpc("submit_fights", { p_token: token, p_fights: entries })) || {};
@@ -3688,7 +3755,9 @@
       jobs.crawl.length = 0;
       collectInfo("Key no longer valid, a new one will be requested");
     } else if (/daily limit/i.test(message)) {
-      collectSave({ pauseUntil: Date.now() + HOUR, pauseReason: "Daily limit of the database reached" });
+      // Only the backfill waits, Eden's list of new fights keeps going
+      collectSave({ jobsPauseUntil: Date.now() + HOUR });
+      collectInfo("Daily limit of the database reached, for one hour only new fights are read");
     } else {
       collectSave({ pauseUntil: Date.now() + COLLECT.dbPauseMs, pauseReason: `Database: ${message}` });
     }
@@ -3867,6 +3936,8 @@
     try {
       if (Date.now() - state.lastList > COLLECT.listEveryMs) {
         await jobList(token);
+      } else if (Date.now() < state.jobsPauseUntil) {
+        return; // database limit: only the list until then
       } else if (!jobs.fights.length && !jobs.crawl.length) {
         // Fetch new jobs. This is no request to Eden. Right away while there
         // is work, once per idleRefillMs when there was none.
