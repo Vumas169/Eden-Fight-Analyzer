@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.94
+// @version      0.95
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.94";
+  const VERSION = "0.95";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -1250,8 +1250,13 @@
     const player = viewPlayer;
     const key = player ? `p|${normalizeName(player)}` : "o";
     if (!force && Date.now() - (edenFetchedAt.get(key) || 0) < FEED.edenEveryMs) return;
+    // Eden asked for a break (429): no request, not even for Refresh, it
+    // would only make the break longer.
     const state = collectState();
-    if (!force && Date.now() < state.pauseUntil && Date.now() - state.lastLimitAt < COLLECT.afterLimitHoldMs) return; // Eden asked for a break
+    if (Date.now() < state.pauseUntil && Date.now() - state.lastLimitAt < COLLECT.afterLimitHoldMs) {
+      if (force) setStatus(`Eden asked for a break until ${fmtDate(new Date(state.pauseUntil))}, showing the database.`);
+      return;
+    }
     edenFetchedAt.set(key, Date.now());
 
     const stillShown = () => (viewPlayer ? `p|${normalizeName(viewPlayer)}` : "o") === key;
@@ -3306,8 +3311,14 @@
     if (rateLog.length > RATE_LOG_MAX) rateLog.splice(0, rateLog.length - RATE_LOG_MAX);
   }
 
+  // Sent in batches; a 429 and anything older than RATE_LOG_MAX_AGE go out
+  // at once, so the log shows what happened right before a block.
+  const RATE_LOG_MAX_AGE = 15 * MINUTE;
+
   async function flushRateLog(token) {
-    if (rateLogSending || !token || rateLog.length < RATE_LOG_BATCH) return;
+    if (rateLogSending || !token || !rateLog.length) return;
+    const urgent = rateLog.some(entry => entry.s === 429) || Date.now() - rateLog[0].t > RATE_LOG_MAX_AGE;
+    if (rateLog.length < RATE_LOG_BATCH && !urgent) return;
     if (Date.now() - rateLogFailedAt < RATE_LOG_RETRY_MS) return;
     rateLogSending = true;
     const batch = rateLog.slice(0, RATE_LOG_BATCH);
@@ -3516,7 +3527,7 @@
     minTickMs: 1.5 * SECOND,    // fastest pace, only reached without recent 429 (1 s hit Eden's limit too often)
     afterLimitFloorMs: 2 * SECOND, // after a 429 the pace stays at least this slow ...
     afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
-    maxTickMs: 30 * SECOND,     // slowest pace after repeated "too many requests"
+    maxTickMs: 6 * SECOND,      // slowest pace after repeated 429 (30 s only lost time: the blocks came from browsing on Eden at the same time)
     slowDown: 1.5,              // pace factor after Eden answered 429
     speedUpEveryMs: 2 * MINUTE, // within the hour after a 429 the pace speeds up at most this often ...
     speedUpAfter: 5,            // ... and only after this many successful steps in a row
@@ -3952,7 +3963,8 @@
         }
         return;
       } else {
-        const takeFight = jobs.fights.length && (!jobs.crawl.length || jobTurn++ % 2 === 0);
+        // Two player lists per class lookup: the lists bring the missing fights
+        const takeFight = jobs.fights.length && (!jobs.crawl.length || jobTurn++ % 3 === 0);
         if (takeFight) await jobDetail(token, jobs.fights.shift());
         else await jobCrawl(token, jobs.crawl.shift());
       }
