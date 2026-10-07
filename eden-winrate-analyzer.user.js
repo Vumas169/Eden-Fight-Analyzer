@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.95
+// @version      0.96
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.95";
+  const VERSION = "0.96";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -4266,20 +4266,28 @@
     `;
   }
 
-  // Lower quartile of a list of numbers (linear interpolation)
-  function lowerQuartile(values) {
-    if (!values.length) return 0;
-    const sorted = [...values].sort((a, b) => a - b);
-    const pos = (sorted.length - 1) * 0.25;
-    const low = Math.floor(pos);
-    return sorted[low] + (sorted[Math.min(low + 1, sorted.length - 1)] - sorted[low]) * (pos - low);
+  // Lower quartile weighted by fights: the fight count below which the
+  // players together hold a quarter of all fights in the list. A plain
+  // quartile of players stays at 1 or 2 fights, because most players only
+  // fight a few times; weighted by fights the bar follows the players that
+  // make up the list. Many players with hundreds of fights (Skald, season):
+  // about 45. Few players with few fights (Bainshee): it stays low.
+  function weightedLowerQuartile(values) {
+    const sorted = values.filter(value => value > 0).sort((a, b) => a - b);
+    const total = sorted.reduce((sum, value) => sum + value, 0);
+    let cum = 0;
+    for (const value of sorted) {
+      cum += value;
+      if (cum >= total * 0.25) return value;
+    }
+    return 0;
   }
 
   // Players count for the win rate from ANA_PLAYER_MIN_FIGHTS fights and
-  // above the lower quartile of fights in this list. Below that they are
-  // greyed out and go to the bottom when sorting by win rate.
+  // from the weighted lower quartile. Below that they are greyed out and
+  // go to the bottom when sorting by win rate.
   function playerMinFights(rows) {
-    return Math.max(ANA_PLAYER_MIN_FIGHTS, Math.ceil(lowerQuartile(rows.map(row => row.total))));
+    return Math.max(ANA_PLAYER_MIN_FIGHTS, weightedLowerQuartile(rows.map(row => row.total)));
   }
 
   function anaPlayersHtml(list) {
@@ -4298,7 +4306,7 @@
       ${!ana.showAllPlayers && list.length > rows.length
         ? `<button class="ewa-more-btn" id="ewa-ana-more">Show all ${fmt(list.length)} players</button>`
         : ""}
-      <div class="ewa-ana-note">Greyed out below ${minFights} fights: at least ${ANA_PLAYER_MIN_FIGHTS}, more when the lower quartile of this list is higher. Greyed out players go to the bottom when sorting by win rate.</div>
+      <div class="ewa-ana-note">Greyed out below ${minFights} fights: at least ${ANA_PLAYER_MIN_FIGHTS}, more in lists with many active players (the players with the fewest fights, together a quarter of all fights in this list, do not count). Greyed out players go to the bottom when sorting by win rate.</div>
     `;
   }
 
