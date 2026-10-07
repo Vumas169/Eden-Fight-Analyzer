@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.96
+// @version      0.97
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.96";
+  const VERSION = "0.97";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -779,13 +779,19 @@
     }
   }
 
-  // Shows a player's fights in the panel. The Eden page itself is left
-  // alone, the fights come from the database.
+  // Shows a player: the panel loads him from the database, and the search
+  // goes to the Eden page as well (one request, the page's own). The
+  // panel reads the page's answer along, so his newest fights show up even
+  // before the database has them.
   function searchPlayer(nameOverride) {
     const input = $("#ewa-player");
     const raw = nameOverride !== undefined ? nameOverride : (input ? input.value : "");
     pushNav();
     setPlayer(raw);
+    const name = viewPlayer;
+    pageSearch(name).then(answered => {
+      if (!answered && viewPlayer === name) freshFromEden();
+    });
 
     // The head-to-head belongs to the previous player.
     const h2hField = $("#ewa-h2h");
@@ -830,12 +836,14 @@
     body.scrollTop += box.getBoundingClientRect().top - body.getBoundingClientRect().top - 8;
   }
 
-  // Refresh: the newest fights straight from Eden (the shown player's list
-  // or Eden's general list), then everything again from the database.
+  // Refresh: the Eden page searches again (shown player or the general
+  // list), the panel reads the answer along. If the page does not answer,
+  // the panel asks Eden itself. Then everything again from the database.
   async function refreshList() {
     setStatus("Loading new fights ...");
     feedCache.clear();
-    await freshFromEden({ force: true });
+    const answered = await pageSearch(viewPlayer);
+    if (!answered) await freshFromEden({ force: true });
     return loadFeed({ force: true, silent: true });
   }
 
@@ -857,6 +865,7 @@
 
     showAllFights = false;
     $("#ewa-output").innerHTML = "";
+    pageSearch("", { allSizes: true });
     return loadFeed();
   }
 
@@ -1273,24 +1282,40 @@
     }
 
     const raw = data.notFound ? [] : edenEntries(data);
-    edenExtra.set(key, { t: Date.now(), fights: raw.map(fightFromEden).filter(Boolean) });
-    if (stillShown() && feed.source === "db") {
+    await takeEdenEntries(key, raw, { player, full: true });
+  }
+
+  // Fights from Eden (fetched by us or read from the Eden page's own
+  // request): shown at once, then stored for everybody. If the database
+  // refuses them, they stay visible here anyway.
+  // full: the whole list (player: his complete list, otherwise Eden's general list)
+  async function takeEdenEntries(key, raw, options = {}) {
+    const { player = "", full = false } = options;
+    const fights = raw.map(fightFromEden).filter(Boolean);
+    const known = edenExtra.get(key);
+    const merged = known && Date.now() - known.t < FEED.edenKeepMs
+      ? [...fights, ...known.fights.filter(old => !fights.some(fight => fight.id === old.id))]
+      : fights;
+    edenExtra.set(key, { t: Date.now(), fights: merged });
+    edenFetchedAt.set(key, Date.now());
+
+    const shownKey = viewPlayer ? `p|${normalizeName(viewPlayer)}` : "o";
+    if (shownKey === key && feed.source === "db") {
       const before = feed.fights.length;
       setFeedFights(feed.base || []);
       if (feed.fights.length !== before) redrawKeepingScroll();
       setStatus("");
-    } else if (stillShown()) {
+    } else if (shownKey === key) {
       setStatus("");
     }
 
-    // Store them for everybody. If the database refuses, they stay visible here.
     const token = getToken() || await ensureToken();
     if (!token || !raw.length) return;
     try {
       const res = (await sbRpc("submit_fights", { p_token: token, p_fights: raw.map(dbEntry) })) || {};
-      if (player) {
+      if (full && player) {
         await sbRpc("report_crawl", { p_token: token, p_name: player, p_size: 0, p_count: raw.length });
-      } else {
+      } else if (full) {
         await sbRpc("mark_list_poll", { p_token: token });
         collectSave({ lastList: Date.now() });
       }
@@ -1298,6 +1323,127 @@
     } catch (error) {
       collectInfo(`Database: ${error.message}`);
     }
+  }
+
+  // ---------------------------------------------------------------
+  // The Eden page's own requests
+  // ---------------------------------------------------------------
+  // When the page loads its list or a player (Eden's Search button), the
+  // answer is read along: shown in the panel at once and stored in the
+  // database. That costs Eden nothing extra.
+
+  const OWN_REQUEST = "ewaOwn";
+  let pageAnswerAt = 0;
+
+  function onPageEdenAnswer(url, text) {
+    const target = String(url || "");
+    const player = target.match(/fights\/player\/([^?&#]+)/);
+    if (!player && !/fights\/list/.test(target)) return;
+    let data;
+    try {
+      data = parseEdenJson(text);
+    } catch (error) {
+      return;
+    }
+    const raw = edenEntries(data);
+    if (!raw.length) return;
+    pageAnswerAt = Date.now();
+    const name = player ? capitalize(decodeURIComponent(player[1]).trim()) : "";
+    const full = !/[?&](min|max)=/.test(target); // Eden's group size filter cuts the list
+    takeEdenEntries(name ? `p|${normalizeName(name)}` : "o", raw, { player: name, full });
+  }
+
+  function watchPageRequests() {
+    try {
+      const proto = pageWindow.XMLHttpRequest.prototype;
+      const open = proto.open;
+      const send = proto.send;
+      proto.open = function (method, url) {
+        this.ewaUrl = String(url || "");
+        return open.apply(this, arguments);
+      };
+      proto.send = function () {
+        if (/hrald\/proxy\.php/.test(this.ewaUrl || "")) {
+          this.addEventListener("load", () => {
+            try {
+              if (this.status === 200) onPageEdenAnswer(this.ewaUrl, this.responseText);
+            } catch (error) {
+              // other response type, never mind
+            }
+          });
+        }
+        return send.apply(this, arguments);
+      };
+    } catch (error) {
+      // cannot watch, the panel then asks Eden itself
+    }
+
+    try {
+      const pageFetch = pageWindow.fetch;
+      pageWindow.fetch = function (input, init) {
+        const promise = pageFetch.apply(this, arguments);
+        const url = typeof input === "string" ? input : (input && input.url) || "";
+        if (!(init && init[OWN_REQUEST]) && /hrald\/proxy\.php/.test(url)) {
+          promise.then(response => {
+            if (response.ok) response.clone().text().then(text => onPageEdenAnswer(url, text)).catch(() => {});
+          }).catch(() => {});
+        }
+        return promise;
+      };
+    } catch (error) {
+      // see above
+    }
+  }
+
+  // Search on the Eden page itself: name (exact) into its field, press its
+  // Search. The panel reads the answer along. Resolves true when the
+  // answer came, false when the page did not search (then we ask Eden).
+  const PAGE_SEARCH_WAIT = 6 * SECOND;
+
+  function pageSearch(name, options = {}) {
+    const field = document.querySelector("#search2");
+    const button = document.querySelector("#search_button2");
+    if (!field || !button) return Promise.resolve(false);
+
+    setExact(!!name);
+    setInputValue(field, name || "");
+    if (options.allSizes) {
+      const minInput = document.querySelector("#select_matchup_min");
+      const maxInput = document.querySelector("#select_matchup_max");
+      if (minInput && maxInput) {
+        setInputValue(minInput, 1);
+        setInputValue(maxInput, MAX_GROUP);
+        setInputValue(minInput, 1);
+      }
+    }
+
+    const key = name ? `p|${normalizeName(name)}` : "o";
+    edenFetchedAt.set(key, Date.now()); // the page asks Eden, we do not
+    const started = Date.now();
+    resetCollected();
+    button.click();
+
+    return new Promise(resolve => {
+      const check = setInterval(() => {
+        if (pageAnswerAt >= started) {
+          clearInterval(check);
+          resolve(true);
+        } else if (Date.now() - started > PAGE_SEARCH_WAIT) {
+          clearInterval(check);
+          edenFetchedAt.delete(key);
+          resolve(false);
+        }
+      }, 200);
+    });
+  }
+
+  // Eden's "exact" checkbox. Eden only stores the value on change and reads
+  // it when Search is pressed, so setting it never starts a search itself.
+  function setExact(on) {
+    const box = document.querySelector("#select_exact");
+    if (!box || box.checked === on) return;
+    box.checked = on;
+    box.dispatchEvent(new Event("change", { bubbles: true }));
   }
 
   const panelOpen = () => {
@@ -3338,7 +3484,7 @@
     const startedAt = Date.now();
     let logged = false;
     try {
-      const response = await pageWindow.fetch(url, { credentials: "same-origin", headers, signal: controller.signal });
+      const response = await pageWindow.fetch(url, { credentials: "same-origin", headers, signal: controller.signal, [OWN_REQUEST]: true });
       logEdenRequest(url, response.status, startedAt, response);
       logged = true;
       if (response.status === 404) return { notFound: true };
@@ -3533,6 +3679,13 @@
     speedUpAfter: 5,            // ... and only after this many successful steps in a row
     speedUp: 0.8,               // pace factor when speeding up
     maxRetryAfterMs: 30 * MINUTE, // cap for the wait time Eden asks for
+    // Eden's fight pages (/fghts/fight.php, used for the classes) have their
+    // own limit: the log shows about 370 per hour, then 429 for about half
+    // an hour, while player lists and the general list keep working. So
+    // class lookups get their own slower pace and their own pause, and a
+    // 429 there no longer stops the rest.
+    fightEveryMs: 12 * SECOND,  // at most one fight page every 12 s (300 per hour, room for your own fight reports)
+    fightPauseMs: 5 * MINUTE,   // after a 429 on a fight page, try again after this long
     idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
     dailyLimit: 40000,          // requests to Eden per day, about one every 2 s around the clock
@@ -3544,14 +3697,13 @@
     registerEveryMs: 10 * MINUTE,
     lockTtlMs: MINUTE,          // another tab takes over when the heartbeat is older
     claimFights: 10,
-    claimCrawl: 10
+    claimCrawl: 20
   };
   const COLLECT_STATE_KEY = "ewa-collect-v1";
   const COLLECT_LOCK_KEY = "ewa-collect-lock";
   const TAB_ID = Math.random().toString(36).slice(2);
 
   const jobs = { fights: [], crawl: [] };
-  let jobTurn = 0;
   let collectBusy = false;
   let lastRefill = 0;
   let edenFailsInRow = 0;
@@ -3574,7 +3726,9 @@
       lastSpeedAt: Math.min(s.lastSpeedAt || 0, Date.now()),
       okInRow: Math.min(s.okInRow || 0, COLLECT.speedUpAfter),
       lastEdenAt: Math.min(s.lastEdenAt || 0, Date.now()),
-      jobsPauseUntil: s.jobsPauseUntil || 0
+      jobsPauseUntil: s.jobsPauseUntil || 0,
+      fightPauseUntil: s.fightPauseUntil || 0,
+      lastFightAt: Math.min(s.lastFightAt || 0, Date.now())
     };
   }
 
@@ -3654,7 +3808,10 @@
     try {
       json = await edenFetchJson(FIGHT_URL(id), {});
     } catch (error) {
-      if (error.status === 429) jobs.fights.unshift(id); // try this fight again after the pause
+      if (error.status === 429) {
+        jobs.fights.unshift(id); // try this fight again after the pause
+        error.fightLimit = true;
+      }
       throw error;
     }
     heartbeat();
@@ -3721,6 +3878,15 @@
   }
 
   function handleCollectError(error) {
+    // 429 on a fight page: only the class lookups wait, the rest goes on
+    // at full pace.
+    if (error.fightLimit) {
+      const until = Date.now() + (retryAfterMs(error.retryAfter) || COLLECT.fightPauseMs);
+      collectSave({ fightPauseUntil: until });
+      collectInfo(`Eden limits its fight pages, class lookups wait until ${fmtDate(new Date(until))}`);
+      return;
+    }
+
     // Any error breaks the run of successful steps the speed up waits for
     collectSave({ okInRow: 0 });
 
@@ -3949,24 +4115,35 @@
         await jobList(token);
       } else if (Date.now() < state.jobsPauseUntil) {
         return; // database limit: only the list until then
-      } else if (!jobs.fights.length && !jobs.crawl.length) {
-        // Fetch new jobs. This is no request to Eden. Right away while there
-        // is work, once per idleRefillMs when there was none.
-        if (Date.now() - lastRefill > COLLECT.idleRefillMs) {
-          const claimed = await sbRpc("claim_jobs", { p_token: token, p_fights: COLLECT.claimFights, p_crawl: COLLECT.claimCrawl });
-          jobs.fights.push(...((claimed && claimed.fights) || []));
-          jobs.crawl.push(...((claimed && claimed.crawl) || []));
-          if (!jobs.fights.length && !jobs.crawl.length) {
-            lastRefill = Date.now();
-            collectInfo("Nothing to do, waiting for new fights");
-          }
-        }
-        return;
       } else {
-        // Two player lists per class lookup: the lists bring the missing fights
-        const takeFight = jobs.fights.length && (!jobs.crawl.length || jobTurn++ % 3 === 0);
-        if (takeFight) await jobDetail(token, jobs.fights.shift());
-        else await jobCrawl(token, jobs.crawl.shift());
+        // A class lookup when its own pace allows, otherwise a player list
+        const now = Date.now();
+        const fightReady = jobs.fights.length && now >= state.fightPauseUntil && now - state.lastFightAt >= COLLECT.fightEveryMs;
+        if (fightReady) {
+          collectSave({ lastFightAt: now });
+          await jobDetail(token, jobs.fights.shift());
+        } else if (jobs.crawl.length) {
+          await jobCrawl(token, jobs.crawl.shift());
+        } else {
+          // Fetch new jobs. This is no request to Eden. Right away while
+          // there is work, once per idleRefillMs when there was none.
+          if (now - lastRefill > COLLECT.idleRefillMs) {
+            const claimed = await sbRpc("claim_jobs", {
+              p_token: token,
+              p_fights: jobs.fights.length ? 0 : COLLECT.claimFights,
+              p_crawl: COLLECT.claimCrawl
+            });
+            const fights = (claimed && claimed.fights) || [];
+            const crawl = (claimed && claimed.crawl) || [];
+            jobs.fights.push(...fights);
+            jobs.crawl.push(...crawl);
+            if (!fights.length && !crawl.length) {
+              lastRefill = now;
+              collectInfo(jobs.fights.length ? "Waiting for the next class lookup" : "Nothing to do, waiting for new fights");
+            }
+          }
+          return;
+        }
       }
       edenFailsInRow = 0;
       collectSave(paceAfterSuccess(collectState()));
@@ -4347,6 +4524,9 @@
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
     lines.push(`Queue: ${jobs.fights.length} fights to read classes from, ${jobs.crawl.length} player lists`);
+    lines.push(now < s.fightPauseUntil
+      ? `Class lookups wait until ${fmtDate(new Date(s.fightPauseUntil))} (Eden limits its fight pages)`
+      : `Class lookups: at most one every ${COLLECT.fightEveryMs / SECOND} s`);
     if (s.lastInfo) lines.push(`Last: ${esc(s.lastInfo)}`);
     return lines.join("<br>");
   }
@@ -4959,6 +5139,9 @@
       }
 
       #ewa-panel.is-detail { width: 880px; }
+      #ewa-panel .ewa-head { cursor: move; user-select: none; }
+      #ewa-panel .ewa-head button { cursor: pointer; }
+      #ewa-panel.is-moving { opacity: .92; box-shadow: 0 24px 60px rgba(0, 0, 0, .65); }
       .ewa-top-wrap { position: absolute; right: 22px; bottom: 16px; z-index: 2; }
       #ewa-panel.is-collapsed .ewa-top-wrap { display: none; }
       #ewa-panel button#ewa-top {
@@ -5549,15 +5732,19 @@
       panel.classList.toggle("is-collapsed", !hidden); // hides the back to top button as well
       if (hidden) topButton.hidden = body.scrollTop < TOP_BUTTON_FROM; // scroll position may have changed
       $("#ewa-collapse").textContent = hidden ? "−" : "+";
+      fitPanelHeight(panel);
     });
 
     watchCollapse(panel);
+    makeDraggable(panel);
 
     if (detail) {
       // Nothing changes on the detail page after loading, so run once.
       calculate();
       return;
     }
+
+    watchPageRequests();
 
     const table = findFightTable();
     if (table) {
@@ -5599,6 +5786,88 @@
     window.addEventListener("pagehide", () => {
       const lock = storageGet(COLLECT_LOCK_KEY);
       if (lock && lock.tab === TAB_ID) storageSet(COLLECT_LOCK_KEY, null);
+    });
+  }
+
+  // ---------------------------------------------------------------
+  // Moving the panel
+  // ---------------------------------------------------------------
+  // Drag the header to move it, double-click the header to put it back in
+  // the corner. The position is kept for the next visit. At least the
+  // header always stays on screen.
+
+  const POS_KEY = "ewa-pos";
+  const POS_KEEP_VISIBLE = 120; // px of the header that must stay on screen
+
+  function placePanel(panel, x, y) {
+    const width = panel.offsetWidth;
+    const left = Math.min(Math.max(x, POS_KEEP_VISIBLE - width), window.innerWidth - POS_KEEP_VISIBLE);
+    const top = Math.min(Math.max(y, 0), window.innerHeight - 48);
+    panel.style.left = `${Math.round(left)}px`;
+    panel.style.top = `${Math.round(top)}px`;
+    panel.style.right = "auto";
+    fitPanelHeight(panel);
+    return { x: Math.round(left), y: Math.round(top) };
+  }
+
+  // The scroll area ends at the bottom of the window, wherever the panel sits
+  function fitPanelHeight(panel) {
+    const body = panel.querySelector("#ewa-body");
+    if (!body) return;
+    if (!panel.style.top) {
+      body.style.maxHeight = "";
+      panel.style.maxHeight = "";
+      return;
+    }
+    const top = panel.getBoundingClientRect().top;
+    const head = body.getBoundingClientRect().top - top;
+    panel.style.maxHeight = `${Math.max(120, window.innerHeight - top - 12)}px`;
+    body.style.maxHeight = `${Math.max(120, window.innerHeight - top - head - 14)}px`;
+  }
+
+  function makeDraggable(panel) {
+    const head = panel.querySelector(".ewa-head");
+    if (!head) return;
+
+    const saved = storageGet(POS_KEY);
+    if (saved && Number.isFinite(saved.x) && Number.isFinite(saved.y)) placePanel(panel, saved.x, saved.y);
+
+    head.addEventListener("pointerdown", event => {
+      if (event.button !== 0 || event.target.closest("button, a, input")) return;
+      event.preventDefault();
+      const rect = panel.getBoundingClientRect();
+      const dx = event.clientX - rect.left;
+      const dy = event.clientY - rect.top;
+      head.setPointerCapture(event.pointerId);
+      panel.classList.add("is-moving");
+
+      const move = moveEvent => placePanel(panel, moveEvent.clientX - dx, moveEvent.clientY - dy);
+      const end = () => {
+        head.removeEventListener("pointermove", move);
+        head.removeEventListener("pointerup", end);
+        head.removeEventListener("pointercancel", end);
+        panel.classList.remove("is-moving");
+        const box = panel.getBoundingClientRect();
+        storageSet(POS_KEY, { x: Math.round(box.left), y: Math.round(box.top) });
+      };
+      head.addEventListener("pointermove", move);
+      head.addEventListener("pointerup", end);
+      head.addEventListener("pointercancel", end);
+    });
+
+    head.addEventListener("dblclick", event => {
+      if (event.target.closest("button, a, input")) return;
+      storageSet(POS_KEY, null);
+      panel.style.left = "";
+      panel.style.top = "";
+      panel.style.right = "";
+      fitPanelHeight(panel);
+    });
+
+    window.addEventListener("resize", () => {
+      if (!panel.style.top) return;
+      const box = panel.getBoundingClientRect();
+      placePanel(panel, box.left, box.top);
     });
   }
 
