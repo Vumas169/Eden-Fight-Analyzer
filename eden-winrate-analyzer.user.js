@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.98
+// @version      0.99
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.98";
+  const VERSION = "0.99";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -3669,12 +3669,16 @@
   // Eden it pauses, and the pause doubles as long as the errors go on.
 
   const COLLECT = {
-    // Version 0.97 sent about 1,100 requests an hour and Eden blocked the
-    // whole connection (no answer at all, not a 429). Until 0.96 about 500
-    // an hour ran for days. So: at most 450 an hour, off by default.
-    tickMs: 8 * SECOND,         // normal pace: one request to Eden every 8 s
-    minTickMs: 8 * SECOND,      // fastest pace
-    afterLimitFloorMs: 12 * SECOND, // after a 429 the pace stays at least this slow ...
+    // Version 0.97 sent about 1,100 requests an hour and Eden flagged the
+    // whole connection (no answer at all, not a 429). About 500 an hour ran
+    // for a day without problems. Eden's staff: no fixed limit, it depends
+    // on the server load; small batches with breaks work best, and every
+    // new attempt while flagged makes the flag last longer.
+    // So: batches of batchSize requests, then a break, about 480 an hour,
+    // and during the prime times only Eden's list. Off by default.
+    tickMs: 3 * SECOND,         // pace inside a batch
+    minTickMs: 3 * SECOND,      // fastest pace
+    afterLimitFloorMs: 6 * SECOND, // after a 429 the pace stays at least this slow ...
     afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
     maxTickMs: 60 * SECOND,      // slowest pace after repeated 429 (30 s only lost time: the blocks came from browsing on Eden at the same time)
     slowDown: 1.5,              // pace factor after Eden answered 429
@@ -3692,7 +3696,12 @@
     idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
     dailyLimit: 8000,           // requests to Eden per day
-    listEveryMs: 5 * MINUTE,    // the general list (latest 500 fights, about 10 hours)
+    listEveryMs: 10 * MINUTE,   // the general list (latest 500 fights, about 10 hours), also during prime time
+    batchSize: 40,              // requests in one batch (list requests do not count) ...
+    batchPauseMs: 3 * MINUTE,   // ... then this break: 40 every 5 minutes, about 480 an hour
+    // Prime times, Berlin time: EU evening 18-24, NA evening 1-6. Then the
+    // server is busy, so only the list is read.
+    primeHours: [18, 19, 20, 21, 22, 23, 1, 2, 3, 4, 5],
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
     maxPauseMs: 2 * HOUR,
     dbPauseMs: 2 * MINUTE,      // pause after a database error
@@ -3731,6 +3740,8 @@
       lastEdenAt: Math.min(s.lastEdenAt || 0, Date.now()),
       jobsPauseUntil: s.jobsPauseUntil || 0,
       fightPauseUntil: s.fightPauseUntil || 0,
+      batchCount: s.batchCount || 0,
+      batchPauseUntil: s.batchPauseUntil || 0,
       lastFightAt: Math.min(s.lastFightAt || 0, Date.now())
     };
   }
@@ -3762,6 +3773,16 @@
 
   function heartbeat() {
     storageSet(COLLECT_LOCK_KEY, { tab: TAB_ID, t: Date.now() });
+  }
+
+  const BERLIN_HOUR = new Intl.DateTimeFormat("en-GB", { timeZone: "Europe/Berlin", hour: "2-digit", hourCycle: "h23" });
+  const isPrimeTime = () => COLLECT.primeHours.includes(Number(BERLIN_HOUR.format(new Date())));
+
+  // One request of a batch done; after batchSize the break starts
+  function countBatchRequest() {
+    const count = collectState().batchCount + 1;
+    if (count >= COLLECT.batchSize) collectSave({ batchCount: 0, batchPauseUntil: Date.now() + COLLECT.batchPauseMs });
+    else collectSave({ batchCount: count });
   }
 
   function countEdenRequest() {
@@ -4124,6 +4145,8 @@
     try {
       if (Date.now() - state.lastList > COLLECT.listEveryMs) {
         await jobList(token);
+      } else if (isPrimeTime() || Date.now() < state.batchPauseUntil) {
+        return; // prime time or break between two batches: only the list
       } else if (Date.now() < state.jobsPauseUntil) {
         return; // database limit: only the list until then
       } else {
@@ -4132,8 +4155,10 @@
         const fightReady = jobs.fights.length && now >= state.fightPauseUntil && now - state.lastFightAt >= COLLECT.fightEveryMs;
         if (fightReady) {
           collectSave({ lastFightAt: now });
+          countBatchRequest();
           await jobDetail(token, jobs.fights.shift());
         } else if (jobs.crawl.length) {
+          countBatchRequest();
           await jobCrawl(token, jobs.crawl.shift());
         } else {
           // Fetch new jobs. This is no request to Eden. Right away while
@@ -4531,7 +4556,9 @@
     if (migrateState) lines.push(esc(migrateState));
     lines.push(`Background mode: ${timerMode === "worker" ? "worker timer" : "page timer"}${awakeMode.length ? `, kept awake (${awakeMode.join(", ")})` : ", not kept awake"}`);
     const limitedRecently = Date.now() - s.lastLimitAt < COLLECT.afterLimitHoldMs;
-    lines.push(`Pace: one request every ${(s.pace / SECOND).toFixed(1)} s${limitedRecently ? " (Eden asked to slow down within the last hour)" : ""}`);
+    lines.push(`Pace: one request every ${(s.pace / SECOND).toFixed(1)} s${limitedRecently ? " (Eden asked to slow down within the last hour)" : ""}, batches of ${COLLECT.batchSize}, then ${COLLECT.batchPauseMs / MINUTE} min break`);
+    if (isPrimeTime()) lines.push("Prime time (EU 18-24, NA 1-6 Berlin time): only Eden's list, every 10 min");
+    else if (now < s.batchPauseUntil) lines.push(`Break between two batches until ${fmtDate(new Date(s.batchPauseUntil))}`);
     lines.push(`Today ${fmt(s.count)} of ${fmt(COLLECT.dailyLimit)} requests to Eden`);
     if (s.lastList) lines.push(`Last list ${Math.max(0, Math.round((now - s.lastList) / MINUTE))} min ago`);
     lines.push(`Queue: ${jobs.fights.length} fights to read classes from, ${jobs.crawl.length} player lists`);
