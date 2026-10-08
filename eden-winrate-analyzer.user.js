@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.97
+// @version      0.98
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.97";
+  const VERSION = "0.98";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -1234,7 +1234,7 @@
     // Opening a player always asks Eden for his newest fights (one request,
     // the same as a search on the Eden page). The overview only does so
     // when nobody has read Eden's list recently.
-    if (!silent && (player || !listIsFresh())) freshFromEden();
+    if (!silent && player && !collected.size) freshFromEden(); // only when the page has not searched him
   }
 
   function listIsFresh() {
@@ -1458,7 +1458,7 @@
     if (Date.now() - feed.at < FEED.autoMs) return;
     // Without a fresh read of Eden's list (collector stopped, paused or
     // at its limit) the newest fights come from Eden directly.
-    if (!listIsFresh()) freshFromEden();
+    // No request to Eden here: only the database is asked again.
     loadFeed({ force: true, silent: true });
   }
 
@@ -3669,11 +3669,14 @@
   // Eden it pauses, and the pause doubles as long as the errors go on.
 
   const COLLECT = {
-    tickMs: 2 * SECOND,         // normal pace: one request to Eden every 2 s
-    minTickMs: 1.5 * SECOND,    // fastest pace, only reached without recent 429 (1 s hit Eden's limit too often)
-    afterLimitFloorMs: 2 * SECOND, // after a 429 the pace stays at least this slow ...
+    // Version 0.97 sent about 1,100 requests an hour and Eden blocked the
+    // whole connection (no answer at all, not a 429). Until 0.96 about 500
+    // an hour ran for days. So: at most 450 an hour, off by default.
+    tickMs: 8 * SECOND,         // normal pace: one request to Eden every 8 s
+    minTickMs: 8 * SECOND,      // fastest pace
+    afterLimitFloorMs: 12 * SECOND, // after a 429 the pace stays at least this slow ...
     afterLimitHoldMs: HOUR,     // ... for this long, so your own browsing on Eden keeps some room
-    maxTickMs: 6 * SECOND,      // slowest pace after repeated 429 (30 s only lost time: the blocks came from browsing on Eden at the same time)
+    maxTickMs: 60 * SECOND,      // slowest pace after repeated 429 (30 s only lost time: the blocks came from browsing on Eden at the same time)
     slowDown: 1.5,              // pace factor after Eden answered 429
     speedUpEveryMs: 2 * MINUTE, // within the hour after a 429 the pace speeds up at most this often ...
     speedUpAfter: 5,            // ... and only after this many successful steps in a row
@@ -3684,12 +3687,12 @@
     // an hour, while player lists and the general list keep working. So
     // class lookups get their own slower pace and their own pause, and a
     // 429 there no longer stops the rest.
-    fightEveryMs: 12 * SECOND,  // at most one fight page every 12 s (300 per hour, room for your own fight reports)
+    fightEveryMs: 20 * SECOND,  // at most one fight page every 20 s
     fightPauseMs: 5 * MINUTE,   // after a 429 on a fight page, try again after this long
     idleResetMs: 15 * MINUTE,   // after this long without collecting, start again at the fastest pace
     rateLimitPauseMs: 2 * MINUTE, // pause after a 429 when Eden does not say how long
-    dailyLimit: 40000,          // requests to Eden per day, about one every 2 s around the clock
-    listEveryMs: MINUTE,        // the general list (latest 500 fights) first, so new fights show up within a minute
+    dailyLimit: 8000,           // requests to Eden per day
+    listEveryMs: 5 * MINUTE,    // the general list (latest 500 fights, about 10 hours)
     pauseMs: 15 * MINUTE,       // first pause after repeated Eden errors, doubles each time
     maxPauseMs: 2 * HOUR,
     dbPauseMs: 2 * MINUTE,      // pause after a database error
@@ -3699,7 +3702,7 @@
     claimFights: 10,
     claimCrawl: 20
   };
-  const COLLECT_STATE_KEY = "ewa-collect-v1";
+  const COLLECT_STATE_KEY = "ewa-collect-v2"; // new key: everybody starts switched off after the block
   const COLLECT_LOCK_KEY = "ewa-collect-lock";
   const TAB_ID = Math.random().toString(36).slice(2);
 
@@ -3712,7 +3715,7 @@
     const s = storageGet(COLLECT_STATE_KEY) || {};
     const today = new Date().toDateString();
     return {
-      enabled: s.enabled !== false,
+      enabled: s.enabled === true, // off until started by hand
       day: today,
       count: s.day === today ? s.count || 0 : 0,
       lastList: s.lastList || 0,
@@ -3904,6 +3907,14 @@
         pauseUntil: Date.now() + wait,
         pauseReason: `Eden asks to slow down (429), new pace one request every ${(pace / SECOND).toFixed(1)} s`
       });
+      edenFailsInRow = 0;
+      return;
+    }
+
+    // No answer at all (network error or timeout): Eden may be blocking this
+    // connection. Stop completely, only a click on Start resumes.
+    if (error.eden && !error.status) {
+      collectSave({ enabled: false, pauseReason: `Eden did not answer (${error.message}). Collecting stopped, start it again by hand once Eden works.` });
       edenFailsInRow = 0;
       return;
     }
