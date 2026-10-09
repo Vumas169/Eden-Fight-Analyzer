@@ -1170,9 +1170,10 @@ VIEWS.player = async (ctx, route) => {
       ${BRACKETS.map(([b, label, hint]) => {
         const e = eloOf(b);
         if (!e) return tile(`Elo ${label}`, "-", `no ${label.toLowerCase()} fights`);
-        const [, rating, rank, peak, games, w, l, gain] = e;
+        const [, rating, rank, peak, games, w, l, gain, rd, opp, est] = e;
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
-        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}"><span>Elo ${label}</span><strong>${fmt(rating)}</strong><em>${rank ? `rank ${fmt(rank)}` : `${fmt(games)} of 20 fights`}${g}</em></div>`;
+        const extra = opp ? `Ø opponent ${fmt(opp)}${w ? `, ${fmt1(pct(est || 0, w))}% of wins vs established players` : ""}` : "";
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}. ${esc(extra)}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${rank ? `rank ${fmt(rank)}` : `${fmt(games)} of 20 fights`}${g}</em>${opp ? `<em>Ø opp ${fmt(opp)}${w ? ` · ${fmt1(pct(est || 0, w))}% vs est.` : ""}</em>` : ""}</div>`;
       }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
@@ -1473,7 +1474,7 @@ VIEWS.classes = async (ctx, route) => {
 
 const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["winrate", "Rate"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
-const LB_TITLE = { elo: "Current Elo", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
+const LB_TITLE = { elo: "Rating with uncertainty, best proven first", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LB_ICON = {
   elo: svgI("M4 15l4-4 3 3 5-6M13 8h3v3"),
@@ -1518,7 +1519,8 @@ VIEWS.lb = async (ctx, route) => {
   const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
-    elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    elo: [["Score", r => fmt(r.score != null ? r.score : r.rating)], ["Rating", r => `${fmt(r.rating)}${r.rd != null ? ` <span class="sub">±${fmt(r.rd)}</span>` : ""}`],
+          ["Ø opponent", r => (r.opp ? fmt(r.opp) : "-")], ["vs established", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-")], ["W / L", wl]],
     loss: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     gain: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
@@ -1529,7 +1531,7 @@ VIEWS.lb = async (ctx, route) => {
   }[kind];
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
-    elo: `Each side counts in the bracket of its own size: Solo = alone (a 1v3 too), Small = own side 2 to 5, Group = own side 6 and more. A duo beating six plays in Small, the six in Group. Team average against team average, start 1500, K 32 for the first 30 fights of a bracket, then 16. Listed from 20 fights, active in the chosen period.`,
+    elo: `Rating system Glicko-2. Score = rating minus twice the uncertainty (±): who stays on top has proven himself against many established opponents. Wins against players with few fights count only partly (full from 20 fights), repeated solo fights against the same opponent within 24 hours count less each time. Ø opponent: average rating of the beaten and lost-to opponents. vs established: share of wins against players with 20 or more fights. Each side counts in the bracket of its own size: Solo, Small (2 to 5), Group (6 and more). Listed from 20 fights, active in the chosen period.`,
     loss: "Elo lost in the period (from the first fight in the period to the last), at least 3 fights. Who had a bad run.",
     gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
