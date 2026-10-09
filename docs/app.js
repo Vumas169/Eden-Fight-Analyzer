@@ -1170,11 +1170,11 @@ VIEWS.player = async (ctx, route) => {
       ${BRACKETS.map(([b, label, hint]) => {
         const e = eloOf(b);
         if (!e) return tile(`Elo ${label}`, "-", `no ${label.toLowerCase()} fights`);
-        const [, rating, rank, peak, games, w, l, gain, rd, opp, est] = e;
+        const [, rating, rank, peak, games, w, l, gain, rd, opp, est, srating, srd, srank] = e;
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
         const provisional = rd != null && rd > 200;
         const status = rank ? `rank ${fmt(rank)}` : games < 20 ? `${fmt(games)} of 20 fights` : "provisional";
-        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs high Elo</em>` : ""}</div>`;
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${srating != null ? `<em>Skill ${fmt(srating)}${srank ? ` · rank ${fmt(srank)}` : ""}</em>` : ""}${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs high Elo</em>` : ""}</div>`;
       }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
@@ -1473,12 +1473,13 @@ VIEWS.classes = async (ctx, route) => {
 // View: Leaderboard
 // ------------------------------------------------------------------
 
-const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
+const LB_KINDS = [["elo", "Elo"], ["skill", "Skill"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
-const LB_TITLE = { elo: "Current Elo, reliable ratings only", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
+const LB_TITLE = { elo: "Current Elo, reliable ratings only", skill: "Elo without gains from farming much weaker opponents", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LB_ICON = {
   elo: svgI("M4 15l4-4 3 3 5-6M13 8h3v3"),
+  skill: svgI("M10 3l2 4.5 5 .5-3.8 3.3 1.1 4.9L10 13.7 5.7 16.2l1.1-4.9L3 8l5-.5z"),
   gain: svgI("M10 16V4M5 9l5-5 5 5"),
   loss: svgI("M10 4v12M5 11l5 5 5-5"),
   wins: svgI("M6 3h8v4a4 4 0 01-8 0zM10 11v4M7 17h6M6 5H3.5a2 2 0 002.5 3M14 5h2.5a2 2 0 01-2.5 3"),
@@ -1492,7 +1493,7 @@ VIEWS.lb = async (ctx, route) => {
   const p = route.params;
   let kind = p.get("k") === "rating" ? "elo" : p.get("k");
   if (!LB_KINDS.some(([k]) => k === kind)) kind = "elo";
-  const isElo = kind === "elo" || kind === "gain" || kind === "loss";
+  const isElo = kind === "elo" || kind === "skill" || kind === "gain" || kind === "loss";
   const bucket = [1, 2, 3].includes(Number(p.get("b"))) ? Number(p.get("b")) : 1;
   const periods = kind === "gain" || kind === "loss" ? LB_PERIODS.filter(([h]) => h && h <= 720) : LB_PERIODS;
   let hours = periods.some(([h]) => String(h) === p.get("h")) ? Number(p.get("h")) : 168;
@@ -1525,6 +1526,8 @@ VIEWS.lb = async (ctx, route) => {
   const cols = {
     elo: [["Elo", r => fmt(r.rating), r => r.rating], ["Peak", r => fmt(r.peak), r => r.peak], ["Win rate", r => rate(r.w, r.l), rateV],
           ["vs high Elo", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-"), r => (r.w ? (r.est || 0) / r.w : -1)], ["W / L", wl, r => r.w + r.l]],
+    skill: [["Skill", r => fmt(r.rating), r => r.rating], ["Elo", r => fmt(r.elo), r => r.elo], ["Win rate", r => rate(r.w, r.l), rateV],
+          ["vs high Elo", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-"), r => (r.w ? (r.est || 0) / r.w : -1)], ["W / L", wl, r => r.w + r.l]],
     loss: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
     gain: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
     wins: [["Wins", r => fmt(r.w), r => r.w], ["Fights", r => fmt(r.w + r.l), r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
@@ -1548,6 +1551,10 @@ VIEWS.lb = async (ctx, route) => {
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
       <div><b>vs high Elo</b><span>Share of wins against strong opponents, measured by their Elo at the time of the fight: Solo from 1600, Small from 1650, Group from 1700 (team average). That is roughly the top quarter of all opponents.</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
+    </div>`,
+    skill: `<div class="notes">
+      <div><b>Skill</b><span>Same rules as the Elo, with one difference: a win against a clearly weaker opponent brings less, and nothing once the win chance is 90% or more (about 380 points apart). Losses count in full. Farming much weaker players does not raise it.</span></div>
+      <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
     </div>`,
     loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
     gain: "Elo won in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
