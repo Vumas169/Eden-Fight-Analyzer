@@ -1,0 +1,60 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Eden Fight Analyzer</title>
+  <meta name="description" content="Live fight statistics for Eden DAoC: players, classes, leaderboards and fights.">
+  <meta name="theme-color" content="#14161c">
+  <link rel="manifest" href="manifest.webmanifest">
+  <link rel="icon" href="icons/icon.svg" type="image/svg+xml">
+  <link rel="apple-touch-icon" href="icons/icon-192.png">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="preconnect" href="https://bvbrhgyvwmhypmyuuqeu.supabase.co" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@600;700&family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="app.css?v=1">
+</head>
+<body>
+  <header class="top">
+    <div class="top-in">
+      <a class="brand" href="#/" title="Overview">
+        <img src="icons/icon.svg" alt="" width="30" height="30">
+        <span class="brand-t">Fight Analyzer<small>by Vumas</small></span>
+      </a>
+      <nav class="nav" id="nav">
+        <a href="#/" data-nav="over">Overview</a>
+        <a href="#/fights" data-nav="fights">Fights</a>
+        <a href="#/classes" data-nav="classes">Classes</a>
+        <a href="#/leaderboard" data-nav="lb">Leaderboard</a>
+        <a href="#/compare" data-nav="compare">Compare</a>
+      </nav>
+      <div class="search" id="search">
+        <svg viewBox="0 0 20 20" aria-hidden="true"><circle cx="8.5" cy="8.5" r="5.5" fill="none" stroke="currentColor" stroke-width="1.8"/><path d="M13 13l4.5 4.5" stroke="currentColor" stroke-width="1.8" stroke-linecap="round"/></svg>
+        <input id="q" type="search" placeholder="Find a player  ( / )" autocomplete="off" spellcheck="false" aria-label="Find a player">
+        <div class="suggest" id="suggest" hidden></div>
+      </div>
+      <div class="top-side">
+        <span class="live" id="live" title="Newest fight in the database"><i></i><span>-</span></span>
+        <button class="icon-btn" id="bell" title="Notify me when a favorite fights" aria-label="Notifications">
+          <svg viewBox="0 0 20 20"><path d="M10 2.5a5 5 0 00-5 5v3.2L3.5 13.5h13L15 10.7V7.5a5 5 0 00-5-5zM8 15.5a2 2 0 004 0" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linejoin="round"/></svg>
+        </button>
+      </div>
+    </div>
+    <div class="favs" id="favs" hidden></div>
+  </header>
+
+  <main id="view" class="view" tabindex="-1"></main>
+
+  <footer class="foot" id="foot">
+    <span>Eden Fight Analyzer by Vumas</span>
+    <span id="foot-db"></span>
+    <a href="https://github.com/Vumas169/Eden-Fight-Analyzer" target="_blank" rel="noopener">Userscript and source</a>
+  </footer>
+
+  <div class="card-pop" id="pop" hidden></div>
+  <div class="toasts" id="toasts"></div>
+
+  <script type="module" src="app.js?v=1"></script>
+</body>
+</html>

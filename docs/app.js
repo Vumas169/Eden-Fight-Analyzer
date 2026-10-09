@@ -1,0 +1,1696 @@
+// Eden Fight Analyzer by Vumas - web app
+// Reads everything from the shared database. No request goes to Eden.
+
+const VERSION = "1.0.0";
+const SB_URL = "https://bvbrhgyvwmhypmyuuqeu.supabase.co";
+const SB_KEY = "sb_publishable_xFsrXEB0pYNgV_nljbK6lw_yySLDZ5c";
+const EDEN_FIGHT_URL = id => `https://eden-daoc.net/fights?id=${encodeURIComponent(id)}`;
+
+const SECOND = 1000;
+const MINUTE = 60 * SECOND;
+const HOUR = 60 * MINUTE;
+const DAY = 24 * HOUR;
+const REFRESH_MS = MINUTE;
+
+// ------------------------------------------------------------------
+// Game data
+// ------------------------------------------------------------------
+
+const CLASS_NAMES = {
+  1: "Paladin", 2: "Armsman", 3: "Scout", 4: "Minstrel", 5: "Theurgist", 6: "Cleric", 7: "Wizard",
+  8: "Sorcerer", 9: "Infiltrator", 10: "Friar", 11: "Mercenary", 12: "Necromancer", 13: "Cabalist",
+  19: "Reaver", 21: "Thane", 22: "Warrior", 23: "Shadowblade", 24: "Skald", 25: "Hunter", 26: "Healer",
+  27: "Spiritmaster", 28: "Shaman", 29: "Runemaster", 30: "Bonedancer", 31: "Berserker", 32: "Savage",
+  33: "Heretic", 34: "Valkyrie", 39: "Bainshee", 40: "Eldritch", 41: "Enchanter", 42: "Mentalist",
+  43: "Blademaster", 44: "Hero", 45: "Champion", 46: "Warden", 47: "Druid", 48: "Bard", 49: "Nightshade",
+  50: "Ranger", 55: "Animist", 56: "Valewalker", 58: "Vampiir", 59: "Warlock", 63: "Occultist"
+};
+
+const ROLES = {
+  Caster: ["Sorcerer", "Wizard", "Theurgist", "Cabalist", "Necromancer", "Heretic", "Runemaster", "Spiritmaster",
+    "Bonedancer", "Warlock", "Thane", "Eldritch", "Enchanter", "Mentalist", "Animist", "Bainshee", "Occultist"],
+  Stealth: ["Infiltrator", "Scout", "Nightshade", "Ranger", "Hunter"],
+  Support: ["Cleric", "Friar", "Minstrel", "Healer", "Shaman", "Bard", "Druid", "Warden"],
+  Tank: ["Armsman", "Paladin", "Mercenary", "Reaver", "Mauler", "Champion", "Hero", "Blademaster", "Vampiir",
+    "Valewalker", "Warrior", "Berserker", "Savage", "Valkyrie", "Skald", "Shadowblade"]
+};
+const ROLE_OF = {};
+for (const [role, list] of Object.entries(ROLES)) for (const cls of list) ROLE_OF[cls] = role;
+
+const ICON = {
+  Tank: '<svg viewBox="0 0 16 16"><path d="M8 1.5l5.5 2v4c0 3.5-2.4 5.8-5.5 7-3.1-1.2-5.5-3.5-5.5-7v-4z" fill="currentColor"/></svg>',
+  Caster: '<svg viewBox="0 0 16 16"><path d="M8 1.5l1.6 4.9L14.5 8l-4.9 1.6L8 14.5l-1.6-4.9L1.5 8l4.9-1.6z" fill="currentColor"/></svg>',
+  Stealth: '<svg viewBox="0 0 16 16"><path d="M1.5 8s2.4-4.5 6.5-4.5S14.5 8 14.5 8s-2.4 4.5-6.5 4.5S1.5 8 1.5 8z" fill="none" stroke="currentColor" stroke-width="1.5"/><circle cx="8" cy="8" r="2" fill="currentColor"/></svg>',
+  Support: '<svg viewBox="0 0 16 16"><path d="M6 2h4v4h4v4h-4v4H6v-4H2V6h4z" fill="currentColor"/></svg>',
+  Unknown: '<svg viewBox="0 0 16 16"><circle cx="8" cy="8" r="5.5" fill="none" stroke="currentColor" stroke-width="1.4"/></svg>'
+};
+
+const REALMS = { 1: "Albion", 2: "Midgard", 3: "Hibernia" };
+const REALM_SHORT = { 1: "Alb", 2: "Mid", 3: "Hib" };
+
+// 20 % and 80 % marks of fight durations per group size (seconds).
+// Replaced by the numbers from the database when they arrive.
+let durationMarks = {
+  1: { fast: 12, slow: 50 }, 2: { fast: 30, slow: 90 }, 3: { fast: 38, slow: 105 }, 4: { fast: 45, slow: 120 },
+  5: { fast: 55, slow: 130 }, 6: { fast: 60, slow: 135 }, 7: { fast: 65, slow: 140 }, 8: { fast: 70, slow: 155 }
+};
+
+// ------------------------------------------------------------------
+// Small helpers
+// ------------------------------------------------------------------
+
+const $ = (sel, root = document) => root.querySelector(sel);
+const $$ = (sel, root = document) => [...root.querySelectorAll(sel)];
+const ESC = { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" };
+const esc = value => String(value ?? "").replace(/[&<>"']/g, ch => ESC[ch]);
+const NF = new Intl.NumberFormat("en-GB");
+const fmt = value => NF.format(Math.round(Number(value) || 0));
+const fmt1 = value => (Number(value) || 0).toLocaleString("en-GB", { minimumFractionDigits: 1, maximumFractionDigits: 1 });
+const pct = (w, n) => (n ? w / n * 100 : 0);
+const pad2 = n => String(n).padStart(2, "0");
+const fmtDate = d => (d ? `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` : "-");
+const fmtDay = d => (d ? `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}` : "-");
+const fmtClock = d => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+const fmtDur = s => (s == null || !(s >= 0) ? "-" : `${Math.floor(s / 60)}:${pad2(Math.round(s % 60))}`);
+const capitalize = t => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
+const norm = t => String(t || "").trim().toLowerCase();
+
+function ago(value) {
+  if (!value) return "-";
+  const t = value instanceof Date ? value.getTime() : typeof value === "number" ? value : Date.parse(value);
+  const min = Math.max(0, Math.round((Date.now() - t) / MINUTE));
+  if (min < 1) return "just now";
+  if (min < 60) return `${min} min ago`;
+  const h = Math.round(min / 60);
+  return h < 48 ? `${h} h ago` : `${Math.round(h / 24)} days ago`;
+}
+
+const store = {
+  get(key, fallback) {
+    try {
+      const raw = localStorage.getItem(key);
+      return raw === null ? fallback : JSON.parse(raw);
+    } catch (e) { return fallback; }
+  },
+  set(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* private mode */ }
+  }
+};
+
+// ------------------------------------------------------------------
+// Database
+// ------------------------------------------------------------------
+
+async function rpc(fn, body = {}) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), 25 * SECOND);
+  let res;
+  try {
+    res = await fetch(`${SB_URL}/rest/v1/rpc/${fn}`, {
+      method: "POST",
+      headers: { apikey: SB_KEY, "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+      signal: controller.signal
+    });
+  } catch (error) {
+    throw new Error(error.name === "AbortError" ? "The database did not answer in time" : "Database not reachable");
+  } finally {
+    clearTimeout(timer);
+  }
+  const text = await res.text();
+  let json = null;
+  try { json = text ? JSON.parse(text) : null; } catch (e) { json = null; }
+  if (!res.ok) throw new Error((json && (json.message || json.hint)) || `Database error ${res.status}`);
+  return json;
+}
+
+// Results are kept for ttl. A request that is still running is shared.
+const memo = new Map();
+function cached(key, ttl, loader, force = false) {
+  const hit = memo.get(key);
+  if (hit && hit.pending) return hit.pending;
+  if (hit && !force && Date.now() - hit.t < ttl) return Promise.resolve(hit.value);
+  const pending = loader().then(value => {
+    memo.set(key, { t: Date.now(), value });
+    return value;
+  }).catch(error => {
+    if (hit && !hit.pending) memo.set(key, hit);
+    else memo.delete(key);
+    throw error;
+  });
+  memo.set(key, { ...(hit || {}), pending });
+  return pending;
+}
+const peek = key => { const hit = memo.get(key); return hit && "value" in hit ? hit.value : undefined; };
+
+const api = {
+  pulse: force => cached("pulse", MINUTE, () => rpc("server_pulse"), force),
+  heat: () => cached("heat", 10 * MINUTE, () => rpc("activity_heat", { p_days: 30 })),
+  dbInfo: () => cached("dbinfo", 10 * MINUTE, () => rpc("db_info")),
+  marks: () => cached("marks", HOUR, () => rpc("duration_marks")),
+  feed: (hours, size, limit, force) => cached(`feed|${hours}|${size}|${limit}`, MINUTE,
+    () => rpc("fights_feed", { p_hours: hours, p_size: size || null, p_limit: limit }), force),
+  playerFeed: (name, force) => cached(`pfeed|${norm(name)}`, MINUTE,
+    () => rpc("fights_feed", { p_name: name, p_limit: 5000 }), force),
+  card: (name, vs) => cached(`card|${norm(name)}|${(vs || []).join(",")}`, 5 * MINUTE,
+    () => rpc("player_card", { p_name: name, p_vs: vs && vs.length ? vs : null })),
+  profile: (name, hours, size) => cached(`prof|${norm(name)}|${hours}|${size}`, 5 * MINUTE,
+    () => rpc("player_profile", { p_name: name, p_hours: hours, p_size: size || null })),
+  classStats: hours => cached(`cs|${hours}`, 5 * MINUTE, () => rpc("class_stats", { p_hours: hours })),
+  fightCounts: hours => cached(`fc|${hours}`, 5 * MINUTE, () => rpc("fight_counts", { p_hours: hours })),
+  classPlayers: (h, s, c, r) => cached(`cp|${h}|${s}|${c}|${r}`, 5 * MINUTE,
+    () => rpc("class_players", { p_hours: h, p_size: s || null, p_class: c, p_realm: r })),
+  classVs: (h, s, c, r) => cached(`cv|${h}|${s}|${c}|${r}`, 5 * MINUTE,
+    () => rpc("class_matchups", { p_hours: h, p_size: s || null, p_class: c, p_realm: r })),
+  quality: (h, s) => cached(`q|${h}|${s}`, 5 * MINUTE, () => rpc("class_quality", { p_hours: h, p_size: s || null })),
+  matrix: (h, s) => cached(`mx|${h}|${s}`, 5 * MINUTE, () => rpc("matchup_matrix", { p_hours: h, p_size: s || null })),
+  leaderboard: (k, h, s, r, n, force) => cached(`lb|${k}|${h}|${s}|${r}|${n}`, 2 * MINUTE,
+    () => rpc("leaderboard", { p_kind: k, p_hours: h || null, p_size: s || null, p_realm: r || null, p_limit: n }), force),
+  names: q => cached(`ns|${norm(q)}`, 5 * MINUTE, () => rpc("name_search", { p_q: q, p_limit: 8 }))
+};
+
+// ------------------------------------------------------------------
+// Fights
+// ------------------------------------------------------------------
+
+// Row: [id, unix seconds, winners size, losers size, winner realm, loser realm, seconds, winners, losers, zone]
+function fightFromRow(row) {
+  const [id, ts, ws, ls, wr, lr, dur, w, l, zone] = row;
+  const winners = Array.isArray(w) ? w.map(String) : [];
+  const losers = Array.isArray(l) ? l.map(String) : [];
+  return {
+    id: String(id),
+    date: new Date(Number(ts) * SECOND),
+    ws: Number(ws) || winners.length || 1,
+    ls: Number(ls) || losers.length || 1,
+    wr: Number(wr) || 0,
+    lr: Number(lr) || 0,
+    secs: Number(dur) > 0 ? Math.round(Number(dur)) : null,
+    winners,
+    losers,
+    zone: zone || ""
+  };
+}
+
+const bigSide = f => Math.max(f.ws, f.ls);
+const capSize = n => Math.min(n, 8);
+const fightHasSize = (f, size) => capSize(f.ws) === size || capSize(f.ls) === size;
+
+function durClass(secs, size) {
+  if (secs == null) return "";
+  const m = durationMarks[capSize(size)] || durationMarks[8];
+  return secs < m.fast ? "fast" : secs >= m.slow ? "slow" : "";
+}
+
+// Fights of one player, from his point of view
+function playerRows(fights, name) {
+  const target = norm(name);
+  const rows = [];
+  for (const f of fights) {
+    let own = f.winners.find(n => norm(n) === target);
+    let won = true;
+    if (!own) {
+      own = f.losers.find(n => norm(n) === target);
+      won = false;
+    }
+    if (!own) continue;
+    rows.push({
+      fight: f,
+      won,
+      size: won ? f.ws : f.ls,
+      enemySize: won ? f.ls : f.ws,
+      opponents: won ? f.losers : f.winners,
+      mates: (won ? f.winners : f.losers).filter(n => n !== own),
+      enemyRealm: won ? f.lr : f.wr,
+      ownRealm: won ? f.wr : f.lr
+    });
+  }
+  return rows;
+}
+
+function streaks(rows) {
+  let bestW = 0;
+  let bestL = 0;
+  let cur = 0;
+  let last = null;
+  for (let i = rows.length - 1; i >= 0; i -= 1) {
+    const r = rows[i].won;
+    cur = r === last ? cur + 1 : 1;
+    last = r;
+    if (r) bestW = Math.max(bestW, cur); else bestL = Math.max(bestL, cur);
+  }
+  let now = 0;
+  for (const row of rows) {
+    if (row.won !== rows[0].won) break;
+    now += 1;
+  }
+  return { bestW, bestL, now: rows.length ? `${now}${rows[0].won ? "W" : "L"}` : "-", nowWon: rows.length ? rows[0].won : null };
+}
+
+// Lower quartile weighted by fights: below this count players together
+// hold a quarter of all fights in the list.
+function weightedLowerQuartile(values) {
+  const sorted = values.filter(v => v > 0).sort((a, b) => a - b);
+  const total = sorted.reduce((s, v) => s + v, 0);
+  let cum = 0;
+  for (const v of sorted) {
+    cum += v;
+    if (cum >= total * 0.25) return v;
+  }
+  return 0;
+}
+
+// ------------------------------------------------------------------
+// Characters: class and realm per name
+// ------------------------------------------------------------------
+
+const chars = new Map(); // name -> { c, r }
+const charsPending = new Set();
+
+async function loadChars(names) {
+  const missing = [...new Set(names)].filter(n => n && !chars.has(n) && !charsPending.has(n));
+  if (!missing.length) return;
+  missing.forEach(n => charsPending.add(n));
+  try {
+    for (let i = 0; i < missing.length; i += 400) {
+      const part = missing.slice(i, i + 400);
+      const list = await rpc("chars_info", { p_names: part });
+      for (const [name, c, r] of list || []) chars.set(name, { c, r });
+      for (const n of part) if (!chars.has(n)) chars.set(n, { c: null, r: null });
+    }
+  } catch (e) {
+    /* names stay without icon */
+  } finally {
+    missing.forEach(n => charsPending.delete(n));
+  }
+}
+
+// Adds class icons to every name in root that does not have one yet
+async function hydrate(root) {
+  if (!root) return;
+  const els = $$(".pl[data-n]:not([data-h])", root);
+  if (!els.length) return;
+  await loadChars(els.map(el => el.dataset.n));
+  for (const el of els) {
+    if (el.dataset.h) continue;
+    const info = chars.get(el.dataset.n);
+    el.dataset.h = "1";
+    if (info && info.c) el.insertAdjacentHTML("afterbegin", classIcon(info.c));
+  }
+}
+
+const className = id => CLASS_NAMES[id] || (id ? `Class ${id}` : "Unknown");
+const roleOf = id => ROLE_OF[CLASS_NAMES[id]] || "Unknown";
+const classIcon = id => {
+  const role = roleOf(id);
+  return `<span class="ci role-${role.toLowerCase()}" title="${esc(className(id))}">${ICON[role]}</span>`;
+};
+const realmDot = r => (REALMS[r] ? `<span class="rm r${r}" title="${REALMS[r]}"></span>` : "");
+const classHtml = (id, realm) => `<span class="cls">${realm !== undefined ? realmDot(realm) : ""}${classIcon(id)}<span class="cn">${esc(className(id))}</span></span>`;
+
+function nameHtml(name) {
+  const info = chars.get(name);
+  const icon = info && info.c ? classIcon(info.c) : "";
+  return `<a class="pl" href="#/player/${encodeURIComponent(name)}" data-n="${esc(name)}"${info ? ' data-h="1"' : ""}>${icon}${esc(name)}</a>`;
+}
+const namesHtml = names => `<span class="names">${names.map(nameHtml).join("")}</span>`;
+
+// ------------------------------------------------------------------
+// Favorites and notifications
+// ------------------------------------------------------------------
+
+const FAV_KEY = "efa-favs";
+const favs = () => store.get(FAV_KEY, []);
+const isFav = name => favs().some(n => norm(n) === norm(name));
+
+function toggleFav(name) {
+  const list = favs();
+  const i = list.findIndex(n => norm(n) === norm(name));
+  if (i >= 0) list.splice(i, 1); else list.push(name);
+  store.set(FAV_KEY, list.slice(-16));
+  renderFavs();
+}
+
+function renderFavs() {
+  const box = $("#favs");
+  const list = favs();
+  box.hidden = !list.length;
+  const current = state.route.page === "player" ? norm(state.route.arg) : "";
+  box.innerHTML = list.length
+    ? `<span class="favs-label">Favorites</span>${list.map(n => `<a class="fav ${norm(n) === current ? "on" : ""}" href="#/player/${encodeURIComponent(n)}" data-n="${esc(n)}">${esc(n)}</a>`).join("")}`
+    : "";
+}
+
+function toast(html, href) {
+  const el = document.createElement("div");
+  el.className = "toast";
+  el.innerHTML = html;
+  el.addEventListener("click", () => { if (href) location.hash = href; el.remove(); });
+  $("#toasts").appendChild(el);
+  setTimeout(() => el.remove(), 12 * SECOND);
+}
+
+const NOTIFY_KEY = "efa-notify";
+function renderBell() {
+  const on = store.get(NOTIFY_KEY, false);
+  $("#bell").classList.toggle("on", !!on);
+  $("#bell").title = on ? "Notifications on: you hear about new fights of your favorites" : "Notify me when a favorite fights";
+}
+
+async function toggleBell() {
+  const on = !store.get(NOTIFY_KEY, false);
+  if (on && "Notification" in window && Notification.permission === "default") {
+    try { await Notification.requestPermission(); } catch (e) { /* ignore */ }
+  }
+  store.set(NOTIFY_KEY, on);
+  renderBell();
+  toast(on
+    ? (favs().length ? "Notifications on. New fights of your favorites show up here." : "Notifications on. Add favorites with the star on a player page.")
+    : "Notifications off.");
+}
+
+// New fights of favorites, checked with every refresh
+const seenFights = new Set();
+let watchPrimed = false;
+
+function watchFights(fights) {
+  const list = favs().map(norm);
+  const fresh = fights.filter(f => !seenFights.has(f.id));
+  fights.forEach(f => seenFights.add(f.id));
+  if (!watchPrimed) { watchPrimed = true; return; }
+  if (!list.length || !store.get(NOTIFY_KEY, false)) return;
+  for (const f of fresh.slice(0, 5)) {
+    const w = f.winners.find(n => list.includes(norm(n)));
+    const l = f.losers.find(n => list.includes(norm(n)));
+    const who = w || l;
+    if (!who) continue;
+    const text = `${who} ${w ? "won" : "lost"} a ${f.ws}v${f.ls}${f.zone ? ` in ${f.zone}` : ""}`;
+    toast(`<b>${esc(text)}</b><div class="sub">${esc((w ? f.losers : f.winners).slice(0, 4).join(", "))}</div>`, `#/player/${encodeURIComponent(who)}`);
+    if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
+      try { new Notification("Eden Fight Analyzer", { body: text, icon: "icons/icon-192.png", tag: f.id }); } catch (e) { /* ignore */ }
+    }
+  }
+}
+
+// ------------------------------------------------------------------
+// Router
+// ------------------------------------------------------------------
+
+const state = { route: { page: "over", arg: "", params: new URLSearchParams() }, token: 0, ui: {} };
+
+function parseHash() {
+  const raw = location.hash.replace(/^#\/?/, "");
+  const [path, query = ""] = raw.split("?");
+  const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  const page = parts[0] || "over";
+  const map = { "": "over", over: "over", fights: "fights", player: "player", classes: "classes", leaderboard: "lb", compare: "compare" };
+  return { page: map[page] || "over", arg: parts[1] || "", params: new URLSearchParams(query) };
+}
+
+function buildHash(page, arg, params) {
+  const names = { over: "", fights: "fights", player: "player", classes: "classes", lb: "leaderboard", compare: "compare" };
+  const q = new URLSearchParams();
+  for (const [k, v] of Object.entries(params || {})) if (v !== "" && v !== null && v !== undefined && v !== false) q.set(k, v);
+  const query = q.toString();
+  return `#/${names[page]}${arg ? `/${encodeURIComponent(arg)}` : ""}${query ? `?${query}` : ""}`;
+}
+
+// Filter changes replace the history entry, so the back button goes to
+// the previous page and not through every filter click.
+function setParams(patch) {
+  const r = state.route;
+  const params = Object.fromEntries(r.params.entries());
+  for (const [k, v] of Object.entries(patch)) {
+    if (v === null || v === undefined || v === "") delete params[k]; else params[k] = String(v);
+  }
+  history.replaceState(null, "", buildHash(r.page, r.arg, params));
+  render({ keepScroll: true });
+}
+
+const VIEWS = {};
+
+async function render(options = {}) {
+  const { keepScroll = false, silent = false } = options;
+  state.route = parseHash();
+  const token = ++state.token;
+  const page = state.route.page;
+  $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.nav === page || (page === "player" && a.dataset.nav === "fights")));
+  renderFavs();
+  hidePop();
+  if (page !== "player") document.title = "Eden Fight Analyzer";
+  const y = window.scrollY;
+  const ctx = {
+    token,
+    alive: () => token === state.token,
+    silent,
+    view: $("#view")
+  };
+  try {
+    await VIEWS[page](ctx, state.route);
+  } catch (error) {
+    if (!ctx.alive()) return;
+    if (silent) return; // keep what is on screen
+    ctx.view.innerHTML = `<div class="warn"><span>Could not load: ${esc(error.message)}</span><button class="btn" data-act="retry">Try again</button></div>`;
+    console.error(error);
+  }
+  if (!ctx.alive()) return;
+  if (keepScroll || silent) window.scrollTo(0, y);
+  hydrate(ctx.view);
+}
+
+window.addEventListener("hashchange", () => {
+  state.ui = { overSeen: state.ui.overSeen };
+  render();
+  window.scrollTo(0, 0);
+});
+
+// ------------------------------------------------------------------
+// Shared view parts
+// ------------------------------------------------------------------
+
+const PERIODS = [1, 2, 4, 8, 16, 24, 36, 48, 72, 168, 336, 672, 0]; // 0 = season
+const PERIOD_SHORT = { 1: "1h", 2: "2h", 4: "4h", 8: "8h", 16: "16h", 24: "24h", 36: "36h", 48: "2d", 72: "3d", 168: "1w", 336: "2w", 672: "4w", 0: "All" };
+const periodLabel = h => ({ 0: "Season", 24: "Last 24 hours", 48: "Last 2 days", 72: "Last 3 days", 168: "Last 7 days", 336: "Last 2 weeks", 672: "Last 4 weeks" }[h] || `Last ${h} hours`);
+const sizeLabel = s => (s === 1 ? "Solo" : s ? `Group of ${s}${s === 8 ? "+" : ""}` : "All group sizes");
+
+function sliderHtml(hours) {
+  const index = Math.max(0, PERIODS.indexOf(hours));
+  return `
+    <div class="slider">
+      <input type="range" min="0" max="${PERIODS.length - 1}" step="1" value="${index}" data-period aria-label="Period">
+      <div class="ticks">${PERIODS.map((h, i) => `<span class="${i === index ? "on" : ""}" data-set="h=${h}">${PERIOD_SHORT[h]}</span>`).join("")}</div>
+    </div>`;
+}
+
+function segHtml(key, current, options) {
+  return `<div class="seg">${options.map(([v, label, title]) => `<button class="${String(current) === String(v) ? "on" : ""}" data-set="${key}=${v}"${title ? ` title="${esc(title)}"` : ""}>${label}</button>`).join("")}</div>`;
+}
+
+const SIZE_OPTIONS = [[0, "All"], [1, "Solo"], [2, "2"], [3, "3"], [4, "4"], [5, "5"], [6, "6"], [7, "7"], [8, "8+"]];
+const REALM_OPTIONS = [[0, "All"], [1, "Alb"], [2, "Mid"], [3, "Hib"]];
+
+const tile = (label, value, sub) => `<div class="tile"><span>${label}</span><strong>${value}</strong>${sub ? `<em>${sub}</em>` : ""}</div>`;
+
+function barsHtml(rows, opts = {}) {
+  if (!rows.length) return `<div class="empty">No data.</div>`;
+  const max = Math.max(...rows.map(r => r.value), 1);
+  return `<div class="bars">${rows.map(r => `
+    <div class="bar-row ${opts.wide ? "wide" : ""} ${r.set ? "click" : ""}" ${r.set ? `data-set="${r.set}"` : ""} ${r.title ? `title="${esc(r.title)}"` : ""}>
+      <span class="bn">${r.label}</span>
+      <div class="bar"><span style="width:${(r.value / max * 100).toFixed(1)}%"></span></div>
+      <span class="bv">${fmt(r.value)}</span>
+      <span class="bs">${r.sub || ""}</span>
+    </div>`).join("")}</div>`;
+}
+
+function rateBar(rate) {
+  const tone = rate >= 52 ? "up" : rate <= 48 ? "down" : "";
+  return `<span class="rbar ${tone}"><span style="width:${Math.max(0, Math.min(100, rate)).toFixed(1)}%"></span></span>`;
+}
+
+function hoursBarsHtml(buckets, title) {
+  if (!buckets.length) return "";
+  const max = Math.max(...buckets.map(b => b.n), 1);
+  const step = Math.max(1, Math.round(buckets.length / 6));
+  const total = buckets.reduce((s, b) => s + b.n, 0);
+  return `
+    <div class="hours">
+      <div class="panel-h">${title}<span class="right muted">${fmt(total)} fights · peak ${fmt(max)}</span></div>
+      <div class="hours-bars">${buckets.map(b => `<i class="${b.n ? "" : "is-empty"}" style="height:${b.n ? Math.max(5, b.n / max * 100) : 100}%" title="${esc(b.label)}: ${fmt(b.n)} fights"></i>`).join("")}</div>
+      <div class="hours-scale">${buckets.filter((_, i) => i % step === 0).map(b => `<span>${esc(b.short)}</span>`).join("")}</div>
+    </div>`;
+}
+
+// Hour buckets of the last n hours from a fight list
+function hourBuckets(fights, count) {
+  const now = new Date();
+  now.setMinutes(0, 0, 0);
+  const last = now.getTime();
+  const out = Array.from({ length: count }, (_, i) => {
+    const from = new Date(last - (count - 1 - i) * HOUR);
+    return { n: 0, short: fmtClock(from), label: `${fmtClock(from)} to ${fmtClock(new Date(from.getTime() + HOUR))}` };
+  });
+  for (const f of fights) {
+    const d = new Date(f.date);
+    d.setMinutes(0, 0, 0);
+    const age = Math.round((last - d.getTime()) / HOUR);
+    if (age >= 0 && age < count) out[count - 1 - age].n += 1;
+  }
+  return out;
+}
+
+const DAYS = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+function heatmapHtml(cells) {
+  if (!cells || !cells.length) return `<div class="empty">No data.</div>`;
+  const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+  for (const [dow, hour, count] of cells) grid[Number(dow) - 1][Number(hour)] = Number(count);
+  const max = Math.max(...grid.flat(), 1);
+  return `
+    <div class="heat">
+      <div class="heat-row"><span></span>${Array.from({ length: 24 }, (_, h) => `<span>${h % 3 === 0 ? h : ""}</span>`).join("")}</div>
+      ${grid.map((row, d) => `<div class="heat-row"><span>${DAYS[d]}</span>${row.map((c, h) => `<i style="--a:${(0.05 + c / max * 0.95).toFixed(3)}" title="${DAYS[d]} ${pad2(h)}:00 · ${fmt(c)} fights"></i>`).join("")}</div>`).join("")}
+    </div>`;
+}
+
+// One fight in a list. With rows from a player's point of view the stripe
+// shows his result, otherwise both sides are listed.
+function fightHtml(f, row, opts = {}) {
+  const open = state.ui.open && state.ui.open.has(f.id);
+  const dc = durClass(f.secs, bigSide(f));
+  const meta = `<div class="f-meta"><b>${fmtDate(f.date)}</b><br>${esc(f.zone || "")}</div>`;
+  const dur = `<span class="f-dur ${dc}" title="${dc === "fast" ? "Fast for this size" : dc === "slow" ? "Long for this size" : "Duration"}">${fmtDur(f.secs)}</span>`;
+  if (row) {
+    return `
+      <div class="fight ${row.won ? "is-win" : "is-loss"} ${opts.isNew ? "new" : ""}" data-fid="${esc(f.id)}">
+        <div class="f-badge"><b>${row.won ? "W" : "L"}</b>${f.ws}v${f.ls}</div>
+        <div class="f-main">
+          <div class="f-line">${realmDot(row.enemyRealm)}${namesHtml(row.opponents)}</div>
+          ${row.mates.length ? `<div class="f-line dim">with&nbsp;${namesHtml(row.mates)}</div>` : ""}
+        </div>
+        ${dur}${meta}
+        ${open ? fightDetailHtml(f) : ""}
+      </div>`;
+  }
+  return `
+    <div class="fight ${opts.isNew ? "new" : ""}" data-fid="${esc(f.id)}">
+      <div class="f-badge"><b class="${f.ws < f.ls ? "" : ""}">${f.ws}v${f.ls}</b>${f.ws < f.ls ? '<span class="ud" title="The smaller side won">UD</span>' : ""}</div>
+      <div class="f-main">
+        <div class="f-line"><span class="tag w">W</span>${realmDot(f.wr)}${namesHtml(f.winners)}</div>
+        <div class="f-line"><span class="tag l">L</span>${realmDot(f.lr)}${namesHtml(f.losers)}</div>
+      </div>
+      ${dur}${meta}
+      ${open ? fightDetailHtml(f) : ""}
+    </div>`;
+}
+
+function fightDetailHtml(f) {
+  const side = (names, realm, won) => `
+    <div class="f-side">
+      <h4 class="${won ? "w" : "l"}">${won ? "Winners" : "Losers"} ${realmDot(realm)}<span class="sub">${names.length}</span></h4>
+      <div class="list">${names.map(n => {
+        const info = chars.get(n);
+        return `<div class="li"><span class="lm">${nameHtml(n)}</span><span class="ls">${info && info.c ? esc(className(info.c)) : ""}</span></div>`;
+      }).join("")}</div>
+    </div>`;
+  return `
+    <div class="f-detail" data-stop>
+      ${side(f.winners, f.wr, true)}
+      ${side(f.losers, f.lr, false)}
+      <div class="f-acts">
+        <span>${fmtDay(f.date)} ${fmtClock(f.date)} · ${f.ws}v${f.ls} · ${fmtDur(f.secs)}${f.zone ? ` · ${esc(f.zone)}` : ""}</span>
+        <span class="sp"></span>
+        <a class="btn sm" href="${EDEN_FIGHT_URL(f.id)}" target="_blank" rel="noopener">Fight report on Eden</a>
+      </div>
+    </div>`;
+}
+
+const LIST_STEP = 50;
+const LIST_FIRST = { over: 15 };
+function fightListHtml(items, key, renderOne) {
+  const shown = state.ui.shown && state.ui.shown[key] || LIST_FIRST[key] || LIST_STEP;
+  if (!items.length) return `<div class="empty">No fights in this selection.</div>`;
+  return `
+    <div class="fights">${items.slice(0, shown).map(renderOne).join("")}</div>
+    ${items.length > shown ? `<button class="btn full" data-act="more" data-key="${key}">Show ${fmt(Math.min(LIST_STEP * 4, items.length - shown))} more of ${fmt(items.length - shown)}</button>` : ""}`;
+}
+
+function oppListHtml(entries, valueKey, unit = "") {
+  if (!entries.length) return `<div class="empty">No data.</div>`;
+  return `<div class="list">${entries.map(e => `
+    <div class="li"><span class="lm">${realmDot(e.realm)}${nameHtml(e.name)}${e.sub ? ` <span class="sub">${e.sub}</span>` : ""}</span><span class="lv ${valueKey === "wins" ? "w" : valueKey === "losses" ? "l" : ""}">${fmt(e[valueKey])}${unit}</span></div>`).join("")}</div>`;
+}
+
+function groupsHtml(groups, title, hint) {
+  if (!groups.length) return "";
+  return `
+    <div class="panel">
+      <h2>${title}${hint ? ` <em>${hint}</em>` : ""}</h2>
+      <div class="list">${groups.slice(0, 8).map(g => {
+        const n = g.wins + g.losses;
+        return `<div class="li"><span class="lm">${realmDot(g.realm)}${namesHtml(g.names)}</span><span class="ls"><span class="w">${g.wins}</span>/<span class="l">${g.losses}</span></span><span class="lv">${fmt1(pct(g.wins, n))}%</span></div>`;
+      }).join("")}</div>
+    </div>`;
+}
+
+function addGroup(map, names, realm, won) {
+  if (names.length < 2) return;
+  const key = names.map(norm).sort().join("|");
+  if (!map.has(key)) map.set(key, { names: [...names], realm, wins: 0, losses: 0 });
+  const g = map.get(key);
+  if (won) g.wins += 1; else g.losses += 1;
+}
+const sortedGroups = map => [...map.values()].filter(g => g.wins + g.losses >= 2)
+  .sort((a, b) => (b.wins + b.losses) - (a.wins + a.losses) || b.wins - a.wins);
+
+async function copyText(text, button) {
+  try {
+    await navigator.clipboard.writeText(text);
+    if (button) {
+      const label = button.textContent;
+      button.textContent = "Copied";
+      setTimeout(() => { button.textContent = label; }, 1500);
+    }
+  } catch (e) {
+    toast("Copying is blocked in this browser.");
+  }
+}
+
+const loadingHtml = () => `<div class="grid"><div class="skel h"></div><div class="skel t"></div></div>`;
+const appUrl = hash => `${location.origin}${location.pathname}${hash}`;
+
+// ------------------------------------------------------------------
+// View: Overview
+// ------------------------------------------------------------------
+
+VIEWS.over = async (ctx) => {
+  if (!ctx.silent && !peek("pulse")) ctx.view.innerHTML = loadingHtml();
+  const [pulse, recentRaw, top] = await Promise.all([
+    api.pulse(ctx.silent),
+    api.feed(3, null, 400, ctx.silent),
+    api.leaderboard("rating", 168, null, null, 8).catch(() => null)
+  ]);
+  const heat = await api.heat().catch(() => null);
+  if (!ctx.alive()) return;
+
+  const recent = (recentRaw.rows || []).map(fightFromRow);
+  watchFights(recent);
+  updateLive(pulse.last);
+  const before = state.ui.overSeen || new Set();
+  state.ui.overSeen = new Set(recent.map(f => f.id));
+
+  const sizes = (pulse.sizes || []).map(([s, c]) => ({ label: s === 1 ? "Solo" : s === 8 ? "8+" : `${s}`, value: Number(c), sub: `${fmt1(pct(c, pulse.day))}%`, set: null }));
+  const zones = (pulse.zones || []).map(([z, c]) => ({ label: esc(z), value: Number(c), sub: "" }));
+  const classes = (pulse.classes || []).map(([cls, realm, c, players]) => ({ label: classHtml(cls, realm), value: Number(c), sub: `${fmt(players)} players` }));
+  const people = (list, unit) => oppListHtml((list || []).map(([name, cls, realm, n]) => ({ name, realm, n, sub: esc(className(cls)) })), "n", unit);
+  const hours = (pulse.hours || []).map(([t, c]) => [Number(t) * SECOND, Number(c)]).sort((a, b) => a[0] - b[0])
+    .map(([t, c]) => ({ n: c, short: fmtClock(new Date(t)), label: `${fmtClock(new Date(t))}` }));
+  const underdogs = (pulse.underdogs || []).map(([id, ts, ws, ls, wr, lr, w, l, zone]) => fightFromRow([id, ts, ws, ls, wr, lr, null, w, l, zone]));
+  const solo = (pulse.sizes || []).find(([s]) => s === 1);
+  const lbRows = (top && top.rows) || [];
+  const favList = favs();
+
+  ctx.view.innerHTML = `
+    <div class="page-head">
+      <div><h1>Eden right now</h1><p>Live from Eden's fight feed. Updates every minute while this page is open.</p></div>
+    </div>
+    <div class="tiles">
+      ${tile("Fights today", fmt(pulse.today), "since midnight")}
+      ${tile("Last 24 hours", fmt(pulse.day), solo ? `${fmt1(pct(solo[1], pulse.day))}% solo` : "fights")}
+      ${tile("Active players", fmt(pulse.active), "last 24 hours")}
+      ${tile("Biggest upset", underdogs.length ? `${underdogs[0].ws}v${underdogs[0].ls}` : "-", underdogs.length ? `${esc(underdogs[0].winners.slice(0, 2).join(", "))}${underdogs[0].winners.length > 2 ? " ..." : ""}` : "smaller side won, 24 h")}
+      ${tile("Last fight", ago(pulse.last), pulse.last ? fmtDate(new Date(pulse.last)) : "")}
+    </div>
+
+    <div class="grid g-main" style="margin-top:16px">
+      <div class="stack">
+        <div class="panel">${hoursBarsHtml(hours, "Fights per hour · last 24 h")}</div>
+        <div class="panel">
+          <h2>Latest fights <em>click a fight for both line-ups</em><a class="right more" href="#/fights?h=24">All fights</a></h2>
+          ${fightListHtml(recent, "over", f => fightHtml(f, null, { isNew: before.size && !before.has(f.id) }))}
+        </div>
+      </div>
+      <div class="stack">
+        <div class="panel">
+          <h2>Top Elo · 7 days <em>1v1</em><a class="right more" href="#/leaderboard?k=rating&h=168">Leaderboard</a></h2>
+          ${lbRows.length ? `<div class="list">${lbRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${esc(className(r.c))}</span></span><span class="lv">${fmt(r.rating)}</span></div>`).join("")}</div>` : `<div class="empty">The Elo ranking is being calculated.</div>`}
+        </div>
+        ${favList.length ? `<div class="panel" id="fav-panel"><h2>Your favorites</h2><div class="list">${favList.map(n => `<div class="li" data-favcard="${esc(n)}"><span class="lm">${nameHtml(n)}</span><span class="ls"><span class="spin"></span></span></div>`).join("")}</div></div>` : ""}
+        <div class="panel"><h2>Most kills · last hour</h2>${people(pulse.kills_hour, "")}</div>
+        <div class="panel"><h2>Win streaks · 24 h</h2>${people(pulse.streaks, "W")}</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:16px">
+      <h2>Biggest underdog wins · 24 h <em>the smaller side won</em></h2>
+      ${underdogs.length ? `<div class="fights">${underdogs.map(f => fightHtml(f, null)).join("")}</div>` : `<div class="empty">None in the last 24 hours.</div>`}
+    </div>
+
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel"><h2>Group sizes · 24 h</h2>${barsHtml(sizes)}</div>
+      <div class="panel"><h2>Zones · 24 h</h2>${barsHtml(zones, { wide: true })}</div>
+    </div>
+
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel"><h2>Classes played · 24 h<a class="right more" href="#/classes?w=0">Class win rates</a></h2>${barsHtml(classes, { wide: true })}</div>
+      <div class="panel"><h2>Busy times · last 30 days <em>Berlin time</em></h2>${heatmapHtml(heat)}</div>
+    </div>
+  `;
+  fillFavCards(ctx);
+};
+
+async function fillFavCards(ctx) {
+  for (const el of $$("[data-favcard]", ctx.view)) {
+    const name = el.dataset.favcard;
+    api.card(name).then(c => {
+      if (!ctx.alive()) return;
+      const n7 = (c.wins7 || 0) + (c.losses7 || 0);
+      $(".ls", el).innerHTML = `${n7 ? `<span class="w">${c.wins7}</span>/<span class="l">${c.losses7}</span> · 7 d · ` : ""}${esc(ago(c.last))}`;
+    }).catch(() => { $(".ls", el).textContent = ""; });
+  }
+}
+
+function updateLive(last) {
+  const el = $("#live");
+  if (!last) return;
+  const age = Date.now() - Date.parse(last);
+  el.classList.toggle("ok", age < 20 * MINUTE);
+  el.classList.toggle("stale", age >= 20 * MINUTE);
+  $("span", el).textContent = `Last fight ${ago(last)}`;
+}
+
+// ------------------------------------------------------------------
+// View: Fights
+// ------------------------------------------------------------------
+
+const hoursParam = (params, fallback) => {
+  const h = params.has("h") ? Number(params.get("h")) : fallback;
+  return PERIODS.includes(h) ? h : fallback;
+};
+const sizeParam = params => {
+  const s = Number(params.get("s") || 0);
+  return s >= 1 && s <= 8 ? s : 0;
+};
+
+VIEWS.fights = async (ctx, route) => {
+  const hours = hoursParam(route.params, 24);
+  const size = sizeParam(route.params);
+  const key = `feed|${hours || null}|${size}|3000`;
+  if (!ctx.silent && !peek(key)) ctx.view.innerHTML = `${fightsHeadHtml(hours, size)}${loadingHtml()}`;
+  const data = await api.feed(hours || null, size, 3000, ctx.silent);
+  if (!ctx.alive()) return;
+  const fights = (data.rows || []).map(fightFromRow);
+  const total = Number(data.total) || fights.length;
+
+  let secs = 0;
+  let timed = 0;
+  let fast = 0;
+  let slow = 0;
+  const sizes = new Map();
+  const players = new Map();
+  const groups = new Map();
+  for (const f of fights) {
+    const big = bigSide(f);
+    if (f.secs != null) {
+      secs += f.secs; timed += 1;
+      const dc = durClass(f.secs, big);
+      if (dc === "fast") fast += 1;
+      if (dc === "slow") slow += 1;
+    }
+    const label = `${f.ws}v${f.ls}`;
+    if (!sizes.has(label)) sizes.set(label, { label, big, n: 0, secs: 0, timed: 0 });
+    const s = sizes.get(label);
+    s.n += 1;
+    if (f.secs != null) { s.secs += f.secs; s.timed += 1; }
+    const add = (name, realm, won) => {
+      const k = norm(name);
+      if (!players.has(k)) players.set(k, { name, realm, wins: 0, losses: 0 });
+      const p = players.get(k);
+      if (won) p.wins += 1; else p.losses += 1;
+    };
+    f.winners.forEach(n => add(n, f.wr, true));
+    f.losers.forEach(n => add(n, f.lr, false));
+    if (big >= 2) {
+      addGroup(groups, f.winners, f.wr, true);
+      addGroup(groups, f.losers, f.lr, false);
+    }
+  }
+  const list = [...players.values()];
+  const topBy = (k, other) => list.filter(p => p[k] > 0).sort((a, b) => b[k] - a[k] || a[other] - b[other]).slice(0, 8)
+    .map(p => ({ ...p, sub: `${fmt1(pct(p.wins, p.wins + p.losses))}% of ${p.wins + p.losses}` }));
+  const sizeRows = [...sizes.values()].sort((a, b) => a.big - b.big || a.label.localeCompare(b.label)).slice(0, 18)
+    .map(s => ({ label: s.label, value: s.n, sub: s.timed ? `Ø ${fmtDur(Math.round(s.secs / s.timed))}` : "", set: `s=${capSize(Math.max(...s.label.split("v").map(Number)))}`, title: "Show only this group size" }));
+  const first = fights.length ? fights[fights.length - 1].date : null;
+  const last = fights.length ? fights[0].date : null;
+  const capped = fights.length < total;
+  const bucketCount = hours && hours >= 3 ? Math.min(hours, 48) : 0;
+
+  ctx.view.innerHTML = `
+    ${fightsHeadHtml(hours, size)}
+    <div class="tiles">
+      ${tile("Fights", fmt(total), `${esc(periodLabel(hours))} · ${esc(sizeLabel(size))}`)}
+      ${tile("Average time", timed ? fmtDur(Math.round(secs / timed)) : "-", "per fight")}
+      ${tile("Fast", `<span class="fast">${fmt(fast)}</span>`, "shortest fifth for the size")}
+      ${tile("Long", `<span class="slow">${fmt(slow)}</span>`, "longest fifth for the size")}
+      ${tile("Covers", last ? fmtDate(last) : "-", first ? `back to ${fmtDate(first)}${capped ? `, newest ${fmt(fights.length)}` : ""}` : "")}
+    </div>
+    ${bucketCount ? `<div class="panel" style="margin-top:16px">${hoursBarsHtml(hourBuckets(fights, bucketCount), `Fights per hour · last ${bucketCount} h`)}</div>` : ""}
+    <div class="grid g3" style="margin-top:16px">
+      <div class="panel"><h2>Matchups <em>click to filter</em></h2>${barsHtml(sizeRows)}</div>
+      <div class="panel"><h2>Most wins</h2>${oppListHtml(topBy("wins", "losses"), "wins")}</div>
+      <div class="panel"><h2>Most losses</h2>${oppListHtml(topBy("losses", "wins"), "losses")}</div>
+    </div>
+    <div style="margin-top:16px">${groupsHtml(sortedGroups(groups), "Recurring groups", "same line-up at least twice")}</div>
+    <div class="panel" style="margin-top:16px">
+      <h2>All fights <em>${fmt(fights.length)}${capped ? ` of ${fmt(total)}` : ""} · click a fight for both line-ups</em></h2>
+      ${fightListHtml(fights, "fights", f => fightHtml(f, null))}
+    </div>
+    ${capped ? `<div class="note">The numbers above the list count all ${fmt(total)} fights only for "Fights". Everything else is calculated from the newest ${fmt(fights.length)}.</div>` : ""}
+  `;
+};
+
+function fightsHeadHtml(hours, size) {
+  return `
+    <div class="page-head"><div><h1>Fights</h1><p>Every fight in the shared database. Group size: one of the two sides has this size.</p></div></div>
+    <div class="ctrls panel">
+      <div class="ctrl"><label>Period</label>${sliderHtml(hours)}</div>
+      <div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS)}</div>
+    </div>`;
+}
+
+// ------------------------------------------------------------------
+// View: Player
+// ------------------------------------------------------------------
+
+VIEWS.player = async (ctx, route) => {
+  const name = capitalize(route.arg.trim());
+  if (!name) { location.hash = "#/fights"; return; }
+  const hours = hoursParam(route.params, 0);
+  const size = sizeParam(route.params);
+  const vsName = capitalize((route.params.get("vs") || "").trim());
+
+  if (!ctx.silent && !peek(`pfeed|${norm(name)}`)) ctx.view.innerHTML = loadingHtml();
+  const [data, card] = await Promise.all([api.playerFeed(name, ctx.silent), api.card(name).catch(() => null)]);
+  if (!ctx.alive()) return;
+  const realName = data.name || name;
+  if (realName !== name) {
+    history.replaceState(null, "", buildHash("player", realName, Object.fromEntries(route.params.entries())));
+    state.route.arg = realName;
+    renderFavs();
+  }
+  document.title = `${realName} · Eden Fight Analyzer`;
+  const fights = (data.rows || []).map(fightFromRow);
+  const all = playerRows(fights, realName);
+  const since = hours ? Date.now() - hours * HOUR : 0;
+  const rows = all.filter(r => r.fight.date.getTime() >= since && (!size || capSize(r.size) === size));
+
+  const profile = await api.profile(realName, hours || null, size).catch(() => null);
+  if (!ctx.alive()) return;
+
+  const cls = card && card.class;
+  const realm = card && card.realm;
+  const r = profile && profile.rating;
+  const wins = rows.filter(x => x.won).length;
+  const n = rows.length;
+  const st = streaks(rows);
+
+  // opponents
+  const opp = new Map();
+  for (const row of rows) {
+    for (const o of row.opponents) {
+      const k = norm(o);
+      if (!opp.has(k)) opp.set(k, { name: o, realm: row.enemyRealm, wins: 0, losses: 0 });
+      const e = opp.get(k);
+      if (row.won) e.wins += 1; else e.losses += 1;
+    }
+  }
+  const oppList = [...opp.values()];
+  const mostW = oppList.filter(e => e.wins).sort((a, b) => b.wins - a.wins || a.losses - b.losses).slice(0, 8)
+    .map(e => ({ ...e, sub: `${e.wins}-${e.losses}` }));
+  const mostL = oppList.filter(e => e.losses).sort((a, b) => b.losses - a.losses || a.wins - b.wins).slice(0, 8)
+    .map(e => ({ ...e, sub: `${e.wins}-${e.losses}` }));
+
+  // own group sizes
+  const bySize = new Map();
+  for (const row of rows) {
+    const s = capSize(row.size);
+    if (!bySize.has(s)) bySize.set(s, { s, w: 0, l: 0 });
+    const e = bySize.get(s);
+    if (row.won) e.w += 1; else e.l += 1;
+  }
+
+  // setups and enemy groups
+  const setups = new Map();
+  const enemies = new Map();
+  for (const row of rows) {
+    if (row.mates.length) addGroup(setups, [realName, ...row.mates], row.ownRealm, row.won);
+    if (row.opponents.length >= 2) addGroup(enemies, row.opponents, row.enemyRealm, row.won);
+  }
+
+  // active hours (local time)
+  const hourCount = new Array(24).fill(0);
+  rows.forEach(row => { hourCount[row.fight.date.getHours()] += 1; });
+
+  // head to head
+  let h2h = null;
+  if (vsName) {
+    const t = norm(vsName);
+    h2h = rows.filter(row => row.opponents.some(o => norm(o) === t));
+  }
+
+  const vs = (profile && profile.vs) || [];
+  const zones = (profile && profile.zones) || [];
+  const showAllVs = !!state.ui.allVs;
+  const fav = isFav(realName);
+
+  state.ui.copy = () => {
+    const lines = [
+      `**${realName}**${cls ? ` (${className(cls)}, ${REALM_SHORT[realm] || "?"})` : ""} · ${periodLabel(hours)} · ${sizeLabel(size)}`,
+      `${fmt1(pct(wins, n))}% win rate · ${fmt(n)} fights (${fmt(wins)} W / ${fmt(n - wins)} L) · current ${st.now}`,
+      r ? `Elo ${fmt(r.rating)} (#${fmt(r.rank)}, peak ${fmt(r.peak)})` : "",
+      appUrl(buildHash("player", realName, {}))
+    ].filter(Boolean);
+    return lines.join("\n");
+  };
+
+  ctx.view.innerHTML = `
+    <div class="panel">
+      <div class="hero">
+        <div>
+          <h1>${esc(realName)}</h1>
+          <div class="hero-sub">
+            ${cls ? classHtml(cls, realm) : `<span>Class not known yet</span>`}
+            ${realm ? `<span>${REALMS[realm]}</span>` : ""}
+            <span>Last fight ${esc(ago(card && card.last))}</span>
+            <span>${fmt(all.length)} fights in the database</span>
+          </div>
+        </div>
+        <div class="acts">
+          <button class="btn star ${fav ? "on" : ""}" data-act="fav" data-name="${esc(realName)}" title="Favorites appear at the top and can notify you">${fav ? "★ Favorite" : "☆ Favorite"}</button>
+          <a class="btn" href="${buildHash("compare", "", { a: realName })}">Compare</a>
+          <button class="btn" data-act="copy" title="Short summary for Discord">Copy</button>
+          <button class="btn" data-act="share" data-url="${esc(appUrl(buildHash("player", realName, Object.fromEntries(route.params.entries()))))}">Copy link</button>
+        </div>
+      </div>
+    </div>
+
+    <div class="tiles" style="margin-top:16px">
+      ${tile("Elo (1v1)", r ? fmt(r.rating) : "-", r ? `rank ${fmt(r.rank)}` : "from 20 solo fights")}
+      ${tile("Peak Elo", r ? fmt(r.peak) : "-", "")}
+      ${tile("1v1 record", r ? `<span class="w">${fmt(r.wins)}</span> / <span class="l">${fmt(r.losses)}</span>` : "-", r ? `${fmt1(pct(r.wins, r.games))}% of ${fmt(r.games)}` : "")}
+      ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
+      ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
+    </div>
+
+    <div class="ctrls panel" style="margin-top:16px">
+      <div class="ctrl"><label>Period</label>${sliderHtml(hours)}</div>
+      <div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS.map(([v, l]) => [v, l, v ? `Own group: ${sizeLabel(v)}` : "All group sizes"]))}</div>
+    </div>
+
+    ${n ? `
+    <div class="grid g-main">
+      <div class="stack">
+        <div class="panel">
+          <h2>${esc(periodLabel(hours))} · ${esc(sizeLabel(size))}</h2>
+          <div class="sum">
+            <div class="big"><strong class="${pct(wins, n) >= 50 ? "w" : "l"}">${fmt1(pct(wins, n))}%</strong><span class="k">Win rate</span></div>
+            <div class="kv"><strong>${fmt(n)}</strong><span class="k">Fights</span></div>
+            <div class="kv"><strong><span class="w">${fmt(wins)}</span> / <span class="l">${fmt(n - wins)}</span></strong><span class="k">W / L</span></div>
+            <div class="kv"><strong class="${st.nowWon ? "w" : "l"}">${st.now}</strong><span class="k">Current</span></div>
+            <div class="kv"><strong><span class="w">${st.bestW}W</span> <span class="l">${st.bestL}L</span></strong><span class="k">Best streaks</span></div>
+          </div>
+          <div class="ratebar"><span style="width:${pct(wins, n).toFixed(1)}%"></span></div>
+          <div class="form">Last ${Math.min(15, n)} ${rows.slice(0, 15).map(x => `<span class="dot ${x.won ? "w" : "l"}" title="${fmtDate(x.fight.date)} · ${x.won ? "won" : "lost"} ${x.fight.ws}v${x.fight.ls}"></span>`).join("")}</div>
+          ${bySize.size > 1 ? `
+          <div class="panel-h" style="margin-top:16px">By own group size <em>click to filter</em></div>
+          <div class="chips">${[...bySize.values()].sort((a, b) => a.s - b.s).map(e => `
+            <button class="chip" data-set="s=${e.s}" title="Show only fights in an own group of ${e.s}"><b>${e.s === 1 ? "Solo" : `${e.s}${e.s === 8 ? "+" : ""} group`}</b><span class="cv"><span class="w">${e.w}</span>/<span class="l">${e.l}</span></span><i>${fmt1(pct(e.w, e.w + e.l))}%</i></button>`).join("")}</div>` : ""}
+        </div>
+
+        <div class="panel">
+          <h2>Head-to-head</h2>
+          <div class="cmp-in">
+            <div class="field"><input id="h2h" placeholder="Opponent name" value="${esc(vsName)}" autocomplete="off" spellcheck="false"><div class="suggest" hidden></div></div>
+            <button class="btn primary" data-act="h2h">Show</button>
+            ${vsName ? `<button class="btn" data-set="vs=">Clear</button><a class="btn" href="${buildHash("compare", "", { a: realName, b: vsName })}">Compare both</a>` : ""}
+          </div>
+          ${h2h ? (h2h.length ? `
+            <div class="sum" style="margin-top:14px">
+              <div class="big"><strong class="${pct(h2h.filter(x => x.won).length, h2h.length) >= 50 ? "w" : "l"}">${fmt1(pct(h2h.filter(x => x.won).length, h2h.length))}%</strong><span class="k">${esc(realName)} wins</span></div>
+              <div class="kv"><strong><span class="w">${h2h.filter(x => x.won).length}</span> / <span class="l">${h2h.filter(x => !x.won).length}</span></strong><span class="k">W / L vs ${esc(vsName)}</span></div>
+            </div>
+            <div style="margin-top:12px">${fightListHtml(h2h, "h2h", x => fightHtml(x.fight, x))}</div>` : `<div class="empty">No fights against ${esc(vsName)} in this selection.</div>`) : `<div class="note">Type a name to see all fights between the two.</div>`}
+        </div>
+
+        <div class="panel">
+          <h2>Fights <em>${fmt(n)} · click a fight for both line-ups</em></h2>
+          ${fightListHtml(rows, "pf", x => fightHtml(x.fight, x))}
+        </div>
+      </div>
+
+      <div class="stack">
+        ${vs.length ? `
+        <div class="panel">
+          <h2>Against classes</h2>
+          <div class="tbl-wrap"><table class="tbl">
+            <thead><tr><th>Class</th><th class="num">Fights</th><th class="num">W</th><th class="num">L</th><th class="num">Win rate</th></tr></thead>
+            <tbody>${(showAllVs ? vs : vs.slice(0, 12)).map(([c, rr, w, l]) => `
+              <tr class="${w + l < 5 ? "thin" : ""}"><td>${classHtml(c, rr)}</td><td class="num">${fmt(w + l)}</td><td class="num w">${fmt(w)}</td><td class="num l">${fmt(l)}</td><td class="num"><b>${fmt1(pct(w, w + l))}%</b>${rateBar(pct(w, w + l))}</td></tr>`).join("")}</tbody>
+          </table></div>
+          ${!showAllVs && vs.length > 12 ? `<button class="btn full" data-act="allvs">Show all ${vs.length} classes</button>` : ""}
+          <div class="note">Faint below 5 fights. In group fights the class was in the enemy group.</div>
+        </div>` : ""}
+        <div class="panel"><h2>Most wins against</h2>${oppListHtml(mostW, "wins")}</div>
+        <div class="panel"><h2>Most losses against</h2>${oppListHtml(mostL, "losses")}</div>
+        ${zones.length ? `<div class="panel"><h2>Zones</h2>${barsHtml(zones.map(([z, w, l]) => ({ label: esc(z), value: w + l, sub: `${fmt1(pct(w, w + l))}% won` })), { wide: true })}</div>` : ""}
+        ${groupsHtml(sortedGroups(setups), "Own setups", "same group at least twice")}
+        ${groupsHtml(sortedGroups(enemies), "Enemy groups", "your record against them")}
+        <div class="panel">${hoursBarsHtml(hourCount.map((c, h) => ({ n: c, short: `${pad2(h)}`, label: `${pad2(h)}:00 to ${pad2((h + 1) % 24)}:00` })), "Active hours <em>your local time</em>")}</div>
+      </div>
+    </div>` : `
+    <div class="panel"><div class="empty">${all.length ? `No fights of ${esc(realName)} in this selection. <button class="btn sm" data-set="h=0&s=0">Show all</button>` : `No fights of ${esc(realName)} in the database. Check the spelling, names are exact.`}</div></div>`}
+  `;
+  attachSuggest($("#h2h"), pick => setParams({ vs: pick }));
+};
+
+// ------------------------------------------------------------------
+// View: Classes
+// ------------------------------------------------------------------
+
+const CLASS_WINDOWS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [2160, "3 months"], [0, "Season"]];
+const sorts = { cls: { key: "rate", dir: -1 }, vs: { key: "rate", dir: -1 }, pl: { key: "total", dir: -1 }, q: { key: "mid80", dir: -1 } };
+
+function sortList(rows, table, minFights) {
+  const { key, dir } = sorts[table];
+  const val = r => (key === "label" ? String(r.label).toLowerCase() : r[key] ?? -Infinity);
+  const cmp = (a, b) => ((val(a) < val(b) ? -1 : val(a) > val(b) ? 1 : 0) * dir) || b.total - a.total;
+  if (key !== "rate" || !minFights) return [...rows].sort(cmp);
+  return [...rows.filter(r => r.total >= minFights).sort(cmp), ...rows.filter(r => r.total < minFights).sort(cmp)];
+}
+
+function th(table, key, label, num = true, title = "") {
+  const s = sorts[table];
+  const on = s.key === key;
+  return `<th class="sort ${num ? "num" : ""} ${on ? "on" : ""}" data-sort="${table}:${key}" ${title ? `title="${esc(title)}"` : ""}>${label}${on ? (s.dir < 0 ? " ▾" : " ▴") : ""}</th>`;
+}
+
+function rateTable(table, rows, minFights, firstLabel, rowAttrs) {
+  return `
+    <div class="tbl-wrap"><table class="tbl">
+      <thead><tr>${th(table, "label", firstLabel, false)}${th(table, "total", "Fights")}${th(table, "wins", "W")}${th(table, "losses", "L")}${th(table, "rate", "Win rate")}</tr></thead>
+      <tbody>${sortList(rows, table, minFights).map(r => `
+        <tr class="${rowAttrs ? "click" : ""} ${r.total < minFights ? "thin" : ""} ${r.sel ? "sel" : ""}" ${rowAttrs ? rowAttrs(r) : ""}>
+          <td>${r.html}</td><td class="num">${fmt(r.total)}</td><td class="num w">${fmt(r.wins)}</td><td class="num l">${fmt(r.losses)}</td>
+          <td class="num"><b>${fmt1(r.rate)}%</b>${rateBar(r.rate)}</td>
+        </tr>`).join("")}</tbody>
+    </table></div>`;
+}
+
+VIEWS.classes = async (ctx, route) => {
+  const p = route.params;
+  const view = ["rates", "quality", "matrix"].includes(p.get("v")) ? p.get("v") : "rates";
+  const wi = Math.min(CLASS_WINDOWS.length - 1, Math.max(0, Number(p.has("w") ? p.get("w") : 1)));
+  const hours = CLASS_WINDOWS[wi][0] || null;
+  const size = sizeParam(p);
+  const realm = [1, 2, 3].includes(Number(p.get("r"))) ? Number(p.get("r")) : 0;
+  const [selC, selR] = (p.get("c") || "").split("-").map(Number);
+  const sel = selC && selR ? { c: selC, r: selR } : null;
+  const mr = [1, 2, 3].includes(Number(p.get("mr"))) ? Number(p.get("mr")) : 1;
+  const mc = [1, 2, 3].includes(Number(p.get("mc"))) ? Number(p.get("mc")) : 2;
+
+  const head = `
+    <div class="page-head"><div><h1>Classes</h1><p>Win rates by class. Group size is your own side: a 1v3 counts as solo for the single player and as 3 for the three.</p></div></div>
+    <div class="ctrls panel">
+      <div class="ctrl"><label>View</label>${segHtml("v", view, [["rates", "Win rates"], ["quality", "Quality"], ["matrix", "Class vs class"]])}</div>
+      <div class="ctrl"><label>Period</label>${segHtml("w", wi, CLASS_WINDOWS.map(([, l], i) => [i, l]))}</div>
+      <div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS)}</div>
+      ${view !== "matrix" ? `<div class="ctrl"><label>Realm</label>${segHtml("r", realm, REALM_OPTIONS)}</div>` : ""}
+    </div>`;
+  if (!ctx.silent && !peek(`cs|${hours}`)) ctx.view.innerHTML = head + loadingHtml();
+
+  const [stats, counts] = await Promise.all([api.classStats(hours), api.fightCounts(hours)]);
+  if (!ctx.alive()) return;
+  const agg = new Map();
+  for (const row of stats || []) {
+    if (size && row.sz !== size) continue;
+    if (realm && row.realm !== realm) continue;
+    const k = `${row.class}|${row.realm}`;
+    if (!agg.has(k)) agg.set(k, { c: row.class, r: row.realm, wins: 0, losses: 0 });
+    const e = agg.get(k);
+    e.wins += row.wins; e.losses += row.losses;
+  }
+  const entries = [...agg.values()].map(e => ({
+    ...e, total: e.wins + e.losses, rate: pct(e.wins, e.wins + e.losses), label: className(e.c),
+    html: classHtml(e.c, e.r), sel: sel && sel.c === e.c && sel.r === e.r
+  }));
+  const fights = (counts || []).filter(c => !size || c.sz === size).reduce((s, c) => s + c.n, 0);
+  state.ui.copy = () => [
+    `**Class win rates** · ${CLASS_WINDOWS[wi][1]} · ${sizeLabel(size)}${realm ? ` · ${REALMS[realm]}` : ""}`,
+    ...sortList(entries, "cls", 20).filter(e => e.total >= 20).slice(0, 15).map((e, i) => `${i + 1}. ${e.label} (${REALM_SHORT[e.r]}) ${fmt1(e.rate)}% of ${fmt(e.total)}`),
+    appUrl(location.hash)
+  ].join("\n");
+
+  const tiles = `
+    <div class="tiles">
+      ${tile("Fights", fmt(fights), `${CLASS_WINDOWS[wi][1]} · ${esc(sizeLabel(size))}`)}
+      ${tile("Classes", fmt(entries.length), realm ? REALMS[realm] : "all realms")}
+      ${(() => {
+        const best = sortList(entries, "cls", 20).find(e => e.total >= 20);
+        return tile("Best win rate", best ? `${fmt1(best.rate)}%` : "-", best ? `${esc(best.label)} (${REALM_SHORT[best.r]})` : "");
+      })()}
+      ${(() => {
+        const most = [...entries].sort((a, b) => b.total - a.total)[0];
+        return tile("Most played", most ? esc(most.label) : "-", most ? `${fmt(most.total)} fights` : "");
+      })()}
+    </div>`;
+
+  let body = "";
+  if (view === "rates") {
+    let side = `<div class="panel"><h2>Pick a class</h2><div class="empty">Click a class to see how it does against every other class and which players play it best.</div></div>`;
+    if (sel) {
+      const [vsList, players] = await Promise.all([
+        api.classVs(hours, size, sel.c, sel.r).catch(() => null),
+        api.classPlayers(hours, size, sel.c, sel.r).catch(() => null)
+      ]);
+      if (!ctx.alive()) return;
+      const vsRows = (vsList || []).map(e => ({ wins: e.wins, losses: e.losses, total: e.wins + e.losses, rate: pct(e.wins, e.wins + e.losses), label: className(e.oclass), html: classHtml(e.oclass, e.orealm) }));
+      const plRows = (players || []).map(e => ({ ...e, total: e.wins + e.losses, rate: pct(e.wins, e.wins + e.losses), label: e.name, html: nameHtml(e.name) }));
+      const minP = Math.max(10, weightedLowerQuartile(plRows.map(x => x.total)));
+      const allPl = !!state.ui.allPlayers;
+      const plSorted = sortList(plRows, "pl", minP);
+      side = `
+        <div class="panel">
+          <h2>${classHtml(sel.c, sel.r)} <em>against classes</em><button class="right btn sm" data-set="c=">Close</button></h2>
+          ${vsList ? rateTable("vs", vsRows, 10, "Against") : `<div class="empty">Not loaded.</div>`}
+          <div class="note">Faint below 10 fights. In group fights the class was in the enemy group, not necessarily the direct opponent.</div>
+        </div>
+        <div class="panel">
+          <h2>Players <em>${fmt(plRows.length)}</em></h2>
+          ${players ? `
+            <div class="tbl-wrap"><table class="tbl">
+              <thead><tr>${th("pl", "label", "Player", false)}${th("pl", "total", "Fights")}${th("pl", "wins", "W")}${th("pl", "losses", "L")}${th("pl", "rate", "Win rate")}</tr></thead>
+              <tbody>${(allPl ? plSorted : plSorted.slice(0, 30)).map(x => `
+                <tr class="${x.total < minP ? "thin" : ""}"><td>${x.html}</td><td class="num">${fmt(x.total)}</td><td class="num w">${fmt(x.wins)}</td><td class="num l">${fmt(x.losses)}</td><td class="num"><b>${fmt1(x.rate)}%</b>${rateBar(x.rate)}</td></tr>`).join("")}</tbody>
+            </table></div>
+            ${!allPl && plSorted.length > 30 ? `<button class="btn full" data-act="allpl">Show all ${fmt(plSorted.length)} players</button>` : ""}
+            <div class="note">Faint below ${minP} fights: at least 10, more when the list has many active players (the players with the fewest fights, together a quarter of all fights in this list, do not count). Faint players go to the bottom when sorting by win rate.</div>` : `<div class="empty">Not loaded.</div>`}
+        </div>`;
+    }
+    body = `
+      <div class="grid g-main" style="margin-top:16px">
+        <div class="panel">
+          <h2>Win rate by class<span class="right"><button class="btn sm" data-act="copy">Copy</button></span></h2>
+          ${entries.length ? rateTable("cls", entries, 20, "Class", e => `data-set="c=${e.sel ? "" : `${e.c}-${e.r}`}" title="${e.sel ? "Close the details" : "Opponents and players of this class"}"`) : `<div class="empty">No data for this selection yet.</div>`}
+          <div class="note">Faint below 20 fights.</div>
+        </div>
+        <div class="stack">${side}</div>
+      </div>`;
+  } else if (view === "quality") {
+    const rows = await api.quality(hours, size);
+    if (!ctx.alive()) return;
+    const list = (rows || []).map(([c, r, players, fightsN, fightWr, playerAvg, mid80, rating]) => ({
+      c, r, players, fights: fightsN, fightWr, playerAvg, mid80, rating, total: fightsN,
+      gap: fightWr != null && playerAvg != null ? playerAvg - fightWr : null, label: className(c)
+    })).filter(x => !realm || x.r === realm);
+    const pctOr = v => (v == null ? "-" : `${fmt1(v)}%`);
+    body = `
+      <div class="panel" style="margin-top:16px">
+        <h2>Class quality <em>how good are the players of a class</em></h2>
+        ${list.length ? `<div class="tbl-wrap"><table class="tbl">
+          <thead><tr>${th("q", "label", "Class", false)}${th("q", "mid80", "Mid 80%", true, "Fight-weighted win rate without the best and worst 10% of players")}${th("q", "playerAvg", "Player avg", true, "Every player counts the same")}${th("q", "fightWr", "Fight WR", true, "All fights of the qualifying players")}${th("q", "gap", "Gap", true, "Player avg minus fight WR")}${th("q", "players", "Players")}${th("q", "fights", "Fights")}${th("q", "rating", "Avg Elo", true, "Average 1v1 Elo of the class")}</tr></thead>
+          <tbody>${sortList(list, "q").map(x => `
+            <tr class="click ${x.players < 10 ? "thin" : ""}" data-set="v=rates&c=${x.c}-${x.r}">
+              <td>${classHtml(x.c, x.r)}</td>
+              <td class="num">${x.mid80 == null ? "-" : `<b>${fmt1(x.mid80)}%</b>${rateBar(x.mid80)}`}</td>
+              <td class="num">${pctOr(x.playerAvg)}</td><td class="num">${pctOr(x.fightWr)}</td>
+              <td class="num ${x.gap > 2 ? "w" : x.gap < -2 ? "l" : ""}">${x.gap == null ? "-" : `${x.gap > 0 ? "+" : ""}${fmt1(x.gap)}`}</td>
+              <td class="num">${fmt(x.players)}</td><td class="num">${fmt(x.fights)}</td><td class="num">${x.rating ? fmt(x.rating) : "-"}</td>
+            </tr>`).join("")}</tbody></table></div>` : `<div class="empty">No data for this selection yet.</div>`}
+        <div class="note">Only players with at least 20 fights and 5 wins in the season count, so a few beginners do not drag a class down. Mid 80% leaves out the best and the worst 10% of players and is the fairest single number. A big gap means a few players with many fights pull the class down (or up).</div>
+      </div>`;
+  } else {
+    const rows = await api.matrix(hours, size);
+    if (!ctx.alive()) return;
+    const cell = new Map();
+    const rSet = new Set();
+    const cSet = new Set();
+    for (const [c, r, oc, or, w, l] of rows || []) {
+      if (r === mr) rSet.add(c);
+      if (or === mc) cSet.add(oc);
+      if (r === mr && or === mc) cell.set(`${c}|${oc}`, [w, l]);
+    }
+    const byName = set => [...set].sort((a, b) => className(a).localeCompare(className(b)));
+    const rl = byName(rSet);
+    const cl = byName(cSet);
+    const tone = rate => {
+      const d = Math.max(-1, Math.min(1, (rate - 50) / 20));
+      return d >= 0 ? `rgba(111, 207, 122, ${(0.12 + d * 0.7).toFixed(2)})` : `rgba(236, 111, 104, ${(0.12 - d * 0.7).toFixed(2)})`;
+    };
+    body = `
+      <div class="panel" style="margin-top:16px">
+        <h2>Class against class</h2>
+        <div class="ctrls">
+          <div class="ctrl"><label>Rows</label>${segHtml("mr", mr, REALM_OPTIONS.slice(1))}</div>
+          <div class="ctrl"><label>Against</label>${segHtml("mc", mc, REALM_OPTIONS.slice(1))}</div>
+        </div>
+        ${rl.length && cl.length ? `
+        <div class="mx" style="--cols:${cl.length}">
+          <div class="mx-row head"><span></span>${cl.map(c => `<span title="${esc(className(c))}">${esc(className(c).slice(0, 4))}</span>`).join("")}</div>
+          ${rl.map(rc => `
+            <div class="mx-row">
+              <span class="mx-name" data-set="v=rates&c=${rc}-${mr}" title="Details of this class">${classHtml(rc)}</span>
+              ${cl.map(cc => {
+                const [w, l] = cell.get(`${rc}|${cc}`) || [0, 0];
+                const nn = w + l;
+                const rate = pct(w, nn);
+                const title = `${className(rc)} vs ${className(cc)}: ${nn ? `${fmt1(rate)}% (${fmt(w)} W / ${fmt(l)} L)` : "no fights"}`;
+                return nn >= 15 ? `<i style="background:${tone(rate)}" title="${esc(title)}">${Math.round(rate)}</i>` : `<i class="thin" title="${esc(title)}">${nn ? Math.round(rate) : ""}</i>`;
+              }).join("")}
+            </div>`).join("")}
+        </div>` : `<div class="empty">No data for this selection yet.</div>`}
+        <div class="note">Win rate of the row class against the column class. Faint below 15 fights. In group fights the classes were in the two groups, not necessarily direct opponents.</div>
+      </div>`;
+  }
+  ctx.view.innerHTML = head + tiles + body;
+};
+
+// ------------------------------------------------------------------
+// View: Leaderboard
+// ------------------------------------------------------------------
+
+const LB_KINDS = [["rating", "Elo"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
+const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
+
+VIEWS.lb = async (ctx, route) => {
+  const p = route.params;
+  const kind = LB_KINDS.some(([k]) => k === p.get("k")) ? p.get("k") : "rating";
+  const hours = LB_PERIODS.some(([h]) => String(h) === p.get("h")) ? Number(p.get("h")) : 168;
+  const size = sizeParam(p);
+  const realm = [1, 2, 3].includes(Number(p.get("r"))) ? Number(p.get("r")) : 0;
+  const limit = p.get("n") === "100" ? 100 : 25;
+  const head = `
+    <div class="page-head"><div><h1>Leaderboard</h1><p>The best players by Elo, wins, win rate, activity, underdog wins and streaks.</p></div></div>
+    <div class="ctrls panel">
+      <div class="ctrl"><label>Ranking</label>${segHtml("k", kind, LB_KINDS)}</div>
+      <div class="ctrl"><label>Period</label>${segHtml("h", hours, LB_PERIODS)}</div>
+      ${kind !== "rating" ? `<div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS)}</div>` : ""}
+      <div class="ctrl"><label>Realm</label>${segHtml("r", realm, REALM_OPTIONS)}</div>
+    </div>`;
+  if (!ctx.silent && !peek(`lb|${kind}|${hours}|${kind === "rating" ? 0 : size}|${realm}|${limit}`)) ctx.view.innerHTML = head + loadingHtml();
+  const data = await api.leaderboard(kind, hours, kind === "rating" ? 0 : size, realm, limit);
+  if (!ctx.alive()) return;
+  const rows = (data && data.rows) || [];
+  const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
+  const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
+  const cols = {
+    rating: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
+    winrate: [["Win rate", r => rate(r.w, r.l)], ["W / L", wl], ["Fights", r => fmt(r.w + r.l)]],
+    active: [["Fights", r => fmt(r.w + r.l)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    underdog: [["Underdog wins", r => fmt(r.w)], ["Biggest gap", r => (r.fid ? `<a class="pl" href="${EDEN_FIGHT_URL(r.fid)}" target="_blank" rel="noopener" title="Fight report on Eden">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`)]],
+    streak: [["Longest streak", r => `${fmt(r.w)}W`]]
+  }[kind];
+  const note = {
+    rating: "Elo from 1v1 fights only, starting at 1500, K 32 for the first 30 fights, then 16. Listed from 20 fights, active in the chosen period.",
+    winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
+    underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
+    streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
+  }[kind] || "";
+
+  ctx.view.innerHTML = `${head}
+    <div class="panel">
+      ${rows.length ? `<div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>#</th><th>Player</th><th>Class</th>${cols.map(([l]) => `<th class="num">${l}</th>`).join("")}</tr></thead>
+        <tbody>${rows.map((r, i) => `
+          <tr class="${i < 3 ? `top${i + 1}` : ""}"><td class="rank-c">${i + 1}</td><td>${realmDot(r.r)}${nameHtml(r.n)}</td><td>${r.c ? classHtml(r.c) : ""}</td>${cols.map(([, f], k) => `<td class="num ${k === 0 ? "main" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")}</tbody>
+      </table></div>
+      ${limit < 100 && rows.length >= 25 ? `<button class="btn full" data-set="n=100">Show top 100</button>` : ""}` : `<div class="empty">No players for this selection yet.</div>`}
+      ${note ? `<div class="note">${note}</div>` : ""}
+    </div>`;
+};
+
+// ------------------------------------------------------------------
+// View: Compare
+// ------------------------------------------------------------------
+
+VIEWS.compare = async (ctx, route) => {
+  const a = capitalize((route.params.get("a") || "").trim());
+  const b = capitalize((route.params.get("b") || "").trim());
+  const head = `
+    <div class="page-head"><div><h1>Compare</h1><p>Two players side by side, with every fight between them.</p></div></div>
+    <div class="panel ctrls">
+      <div class="cmp-in">
+        <div class="field"><input id="cmp-a" placeholder="First player" value="${esc(a)}" autocomplete="off" spellcheck="false"><div class="suggest" hidden></div></div>
+        <button class="btn" data-act="swap" title="Swap">⇄</button>
+        <div class="field"><input id="cmp-b" placeholder="Second player" value="${esc(b)}" autocomplete="off" spellcheck="false"><div class="suggest" hidden></div></div>
+        <button class="btn primary" data-act="compare">Compare</button>
+      </div>
+    </div>`;
+  const wire = () => {
+    attachSuggest($("#cmp-a"), pick => setParams({ a: pick }));
+    attachSuggest($("#cmp-b"), pick => setParams({ b: pick }));
+  };
+  if (!a || !b) {
+    ctx.view.innerHTML = `${head}<div class="panel"><div class="empty">Pick two players. Tip: the Compare button on a player page fills in the first name.</div></div>`;
+    wire();
+    return;
+  }
+  if (!ctx.silent) ctx.view.innerHTML = head + loadingHtml();
+  const [feedA, cardA, cardB, profA, profB] = await Promise.all([
+    api.playerFeed(a), api.card(a).catch(() => null), api.card(b).catch(() => null),
+    api.profile(a, null, 0).catch(() => null), api.profile(b, null, 0).catch(() => null)
+  ]);
+  if (!ctx.alive()) return;
+  const nameA = (cardA && cardA.name) || a;
+  const nameB = (cardB && cardB.name) || b;
+  const rowsA = playerRows((feedA.rows || []).map(fightFromRow), nameA);
+  const tb = norm(nameB);
+  const h2h = rowsA.filter(r => r.opponents.some(o => norm(o) === tb));
+  const together = rowsA.filter(r => r.mates.some(m => norm(m) === tb));
+  const hw = h2h.filter(r => r.won).length;
+  const tw = together.filter(r => r.won).length;
+  const ra = profA && profA.rating;
+  const rb = profB && profB.rating;
+
+  const line = (label, va, vb, num = null, higherBetter = true) => {
+    let ca = "";
+    let cb = "";
+    if (num && num[0] != null && num[1] != null && num[0] !== num[1]) {
+      const aWins = higherBetter ? num[0] > num[1] : num[0] < num[1];
+      ca = aWins ? "better" : "";
+      cb = aWins ? "" : "better";
+    }
+    return `<div class="cmp-row"><span class="${ca}">${va}</span><span class="ck">${label}</span><span class="${cb}">${vb}</span></div>`;
+  };
+  const tot = c => (c ? c.wins + c.losses : 0);
+  const rate7 = c => (c ? pct(c.wins7, c.wins7 + c.losses7) : null);
+
+  // classes both have fought, side by side
+  const vsMap = new Map();
+  for (const [prof, idx] of [[profA, 0], [profB, 1]]) {
+    for (const [c, r, w, l] of (prof && prof.vs) || []) {
+      const k = `${c}|${r}`;
+      if (!vsMap.has(k)) vsMap.set(k, { c, r, s: [null, null] });
+      vsMap.get(k).s[idx] = [w, l];
+    }
+  }
+  const vsRows = [...vsMap.values()].filter(e => e.s[0] && e.s[1] && e.s[0][0] + e.s[0][1] >= 5 && e.s[1][0] + e.s[1][1] >= 5)
+    .sort((x, y) => (y.s[0][0] + y.s[0][1] + y.s[1][0] + y.s[1][1]) - (x.s[0][0] + x.s[0][1] + x.s[1][0] + x.s[1][1])).slice(0, 14);
+  const vsCell = s => `${fmt1(pct(s[0], s[0] + s[1]))}% <span class="sub">of ${fmt(s[0] + s[1])}</span>`;
+
+  const heroMini = (name, card) => `
+    <div class="panel">
+      <div class="hero"><div>
+        <h1 style="font-size:24px">${nameHtml(name)}</h1>
+        <div class="hero-sub">${card && card.class ? classHtml(card.class, card.realm) : "Class not known"}<span>Last fight ${esc(ago(card && card.last))}</span></div>
+      </div></div>
+    </div>`;
+
+  ctx.view.innerHTML = `${head}
+    <div class="vs-head">${heroMini(nameA, cardA)}<span class="vs">vs</span>${heroMini(nameB, cardB)}</div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel">
+        <h2>Numbers</h2>
+        ${line("Elo (1v1)", ra ? fmt(ra.rating) : "-", rb ? fmt(rb.rating) : "-", [ra && ra.rating, rb && rb.rating])}
+        ${line("Rank", ra ? `#${fmt(ra.rank)}` : "-", rb ? `#${fmt(rb.rank)}` : "-", [ra && ra.rank, rb && rb.rank], false)}
+        ${line("Peak Elo", ra ? fmt(ra.peak) : "-", rb ? fmt(rb.peak) : "-", [ra && ra.peak, rb && rb.peak])}
+        ${line("1v1 win rate", ra ? `${fmt1(pct(ra.wins, ra.games))}%` : "-", rb ? `${fmt1(pct(rb.wins, rb.games))}%` : "-", [ra && pct(ra.wins, ra.games), rb && pct(rb.wins, rb.games)])}
+        ${line("All fights", fmt(tot(cardA)), fmt(tot(cardB)), [tot(cardA), tot(cardB)])}
+        ${line("Win rate all", cardA ? `${fmt1(pct(cardA.wins, tot(cardA)))}%` : "-", cardB ? `${fmt1(pct(cardB.wins, tot(cardB)))}%` : "-", [cardA && pct(cardA.wins, tot(cardA)), cardB && pct(cardB.wins, tot(cardB))])}
+        ${line("Last 7 days", cardA ? `${cardA.wins7} / ${cardA.losses7}` : "-", cardB ? `${cardB.wins7} / ${cardB.losses7}` : "-", [rate7(cardA), rate7(cardB)])}
+      </div>
+      <div class="panel">
+        <h2>Against each other</h2>
+        ${h2h.length ? `
+          <div class="sum">
+            <div class="big"><strong class="${hw * 2 >= h2h.length ? "w" : "l"}">${hw} : ${h2h.length - hw}</strong><span class="k">${esc(nameA)} : ${esc(nameB)}</span></div>
+            <div class="kv"><strong>${fmt(h2h.length)}</strong><span class="k">Fights</span></div>
+            <div class="kv"><strong>${h2h[0] ? esc(ago(h2h[0].fight.date)) : "-"}</strong><span class="k">Last one</span></div>
+          </div>
+          <div class="ratebar"><span style="width:${pct(hw, h2h.length).toFixed(1)}%"></span></div>` : `<div class="empty">They have not fought each other.</div>`}
+        ${together.length ? `<div class="note">Same side ${fmt(together.length)} times, ${fmt1(pct(tw, together.length))}% won.</div>` : ""}
+      </div>
+    </div>
+    ${vsRows.length ? `
+    <div class="panel" style="margin-top:16px">
+      <h2>Against classes <em>season, both with at least 5 fights</em></h2>
+      <div class="tbl-wrap"><table class="tbl">
+        <thead><tr><th>Class</th><th class="num">${esc(nameA)}</th><th class="num">${esc(nameB)}</th></tr></thead>
+        <tbody>${vsRows.map(e => {
+          const ra2 = pct(e.s[0][0], e.s[0][0] + e.s[0][1]);
+          const rb2 = pct(e.s[1][0], e.s[1][0] + e.s[1][1]);
+          return `<tr><td>${classHtml(e.c, e.r)}</td><td class="num ${ra2 > rb2 ? "w" : ""}">${vsCell(e.s[0])}</td><td class="num ${rb2 > ra2 ? "w" : ""}">${vsCell(e.s[1])}</td></tr>`;
+        }).join("")}</tbody>
+      </table></div>
+    </div>` : ""}
+    ${h2h.length ? `<div class="panel" style="margin-top:16px"><h2>Fights between them <em>from ${esc(nameA)}'s side</em></h2>${fightListHtml(h2h, "cmp", x => fightHtml(x.fight, x))}</div>` : ""}
+  `;
+  wire();
+};
+
+// ------------------------------------------------------------------
+// Name suggestions
+// ------------------------------------------------------------------
+
+function attachSuggest(input, onPick) {
+  if (!input || input.dataset.wired) return;
+  input.dataset.wired = "1";
+  const box = input.parentElement.querySelector(".suggest");
+  let items = [];
+  let active = -1;
+  let timer = null;
+  let seq = 0;
+
+  const close = () => { box.hidden = true; active = -1; };
+  const draw = () => {
+    if (!items.length) {
+      box.innerHTML = `<div class="s-empty">No player found. Enter opens the name as typed.</div>`;
+      return;
+    }
+    box.innerHTML = items.map(([name, c, r, elo, games], i) => `
+      <a href="#/player/${encodeURIComponent(name)}" data-pick="${esc(name)}" class="${i === active ? "on" : ""}">
+        ${realmDot(r)}${c ? classIcon(c) : ""}<b>${esc(name)}</b>
+        <span class="s-sub">${c ? esc(className(c)) : ""}${elo && games >= 20 ? ` · Elo ${fmt(elo)}` : ""}</span>
+      </a>`).join("");
+  };
+  const pick = name => {
+    close();
+    input.value = name;
+    onPick(name);
+  };
+
+  input.addEventListener("input", () => {
+    clearTimeout(timer);
+    const q = input.value.trim();
+    if (q.length < 2) { close(); return; }
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      try {
+        const list = await api.names(q);
+        if (my !== seq) return;
+        items = list || [];
+        active = -1;
+        draw();
+        box.hidden = false;
+      } catch (e) { close(); }
+    }, 160);
+  });
+  input.addEventListener("keydown", event => {
+    if (event.key === "ArrowDown" || event.key === "ArrowUp") {
+      if (box.hidden || !items.length) return;
+      event.preventDefault();
+      active = (active + (event.key === "ArrowDown" ? 1 : -1) + items.length) % items.length;
+      draw();
+    } else if (event.key === "Enter") {
+      event.preventDefault();
+      const name = active >= 0 && items[active] ? items[active][0] : capitalize(input.value.trim());
+      if (name) pick(name);
+    } else if (event.key === "Escape") {
+      close();
+    }
+  });
+  box.addEventListener("mousedown", event => {
+    const a = event.target.closest("[data-pick]");
+    if (!a) return;
+    event.preventDefault();
+    pick(a.dataset.pick);
+  });
+  input.addEventListener("blur", () => setTimeout(close, 120));
+}
+
+// ------------------------------------------------------------------
+// Hover card for names
+// ------------------------------------------------------------------
+
+let popTimer = null;
+let popFor = null;
+
+function hidePop() {
+  clearTimeout(popTimer);
+  popFor = null;
+  $("#pop").hidden = true;
+}
+
+function showPopFor(el) {
+  const name = el.dataset.n;
+  if (!name) return;
+  popFor = el;
+  clearTimeout(popTimer);
+  popTimer = setTimeout(async () => {
+    const viewing = state.route.page === "player" ? state.route.arg : "";
+    const vs = viewing && norm(viewing) !== norm(name) ? [viewing] : null;
+    let c;
+    try { c = await api.card(name, vs); } catch (e) { return; }
+    if (popFor !== el) return;
+    const n = c.wins + c.losses;
+    const n7 = c.wins7 + c.losses7;
+    const pop = $("#pop");
+    pop.innerHTML = `
+      <h3>${realmDot(c.realm)}${c.class ? classIcon(c.class) : ""}${esc(c.name)}</h3>
+      <div class="cp-sub">${c.class ? esc(className(c.class)) : "Class unknown"}${c.realm ? ` · ${REALMS[c.realm]}` : ""}</div>
+      <div class="cp-kv">
+        <span>All fights</span><b>${n ? `<span class="w">${fmt(c.wins)}</span> / <span class="l">${fmt(c.losses)}</span> · ${fmt1(pct(c.wins, n))}%` : "none"}</b>
+        <span>Last 7 days</span><b>${n7 ? `<span class="w">${fmt(c.wins7)}</span> / <span class="l">${fmt(c.losses7)}</span> · ${fmt1(pct(c.wins7, n7))}%` : "none"}</b>
+        <span>Last fight</span><b>${esc(ago(c.last))}</b>
+        ${vs && (c.vs_wins || c.vs_losses) ? `<span>vs ${esc(viewing)}</span><b><span class="w">${c.vs_wins}</span> / <span class="l">${c.vs_losses}</span></b>` : ""}
+      </div>`;
+    const rect = el.getBoundingClientRect();
+    pop.hidden = false;
+    const w = pop.offsetWidth;
+    const h = pop.offsetHeight;
+    let left = Math.min(window.innerWidth - w - 10, Math.max(10, rect.left));
+    let top = rect.bottom + 8;
+    if (top + h > window.innerHeight - 10) top = rect.top - h - 8;
+    pop.style.left = `${left}px`;
+    pop.style.top = `${top}px`;
+  }, 380);
+}
+
+// ------------------------------------------------------------------
+// Events
+// ------------------------------------------------------------------
+
+document.addEventListener("click", event => {
+  const t = event.target;
+
+  const set = t.closest("[data-set]");
+  if (set && !t.closest("a[href]:not([data-set])")) {
+    event.preventDefault();
+    const patch = Object.fromEntries(new URLSearchParams(set.dataset.set));
+    if ("s" in patch || "h" in patch || "w" in patch || "r" in patch) state.ui.shown = {};
+    if ("c" in patch) state.ui.allPlayers = false;
+    setParams(patch);
+    return;
+  }
+
+  const sort = t.closest("[data-sort]");
+  if (sort) {
+    const [table, key] = sort.dataset.sort.split(":");
+    const s = sorts[table];
+    if (s.key === key) s.dir = -s.dir; else { s.key = key; s.dir = key === "label" ? 1 : -1; }
+    render({ keepScroll: true });
+    return;
+  }
+
+  const act = t.closest("[data-act]");
+  if (act) {
+    const a = act.dataset.act;
+    if (a === "retry") render();
+    if (a === "more") {
+      state.ui.shown = state.ui.shown || {};
+      state.ui.shown[act.dataset.key] = (state.ui.shown[act.dataset.key] || LIST_FIRST[act.dataset.key] || LIST_STEP) + LIST_STEP * 4;
+      render({ keepScroll: true });
+    }
+    if (a === "fav") { toggleFav(act.dataset.name); render({ keepScroll: true }); }
+    if (a === "copy" && state.ui.copy) copyText(state.ui.copy(), act);
+    if (a === "share") copyText(act.dataset.url, act);
+    if (a === "allvs") { state.ui.allVs = true; render({ keepScroll: true }); }
+    if (a === "allpl") { state.ui.allPlayers = true; render({ keepScroll: true }); }
+    if (a === "h2h") { const v = capitalize($("#h2h").value.trim()); setParams({ vs: v }); }
+    if (a === "swap") { const p = state.route.params; setParams({ a: p.get("b") || "", b: p.get("a") || "" }); }
+    if (a === "compare") setParams({ a: capitalize($("#cmp-a").value.trim()), b: capitalize($("#cmp-b").value.trim()) });
+    return;
+  }
+
+  // a fight row opens and closes its line-ups; links inside keep working
+  const fight = t.closest(".fight");
+  if (fight && !t.closest("a, button, [data-stop]")) {
+    const id = fight.dataset.fid;
+    state.ui.open = state.ui.open || new Set();
+    if (state.ui.open.has(id)) {
+      state.ui.open.delete(id);
+      const d = $(".f-detail", fight);
+      if (d) d.remove();
+      return;
+    }
+    state.ui.open.add(id);
+    const f = findFight(id);
+    if (!f) return;
+    loadChars([...f.winners, ...f.losers]).then(() => {
+      if (!state.ui.open.has(id) || $(".f-detail", fight)) return;
+      fight.insertAdjacentHTML("beforeend", fightDetailHtml(f));
+      hydrate(fight);
+    });
+  }
+});
+
+function findFight(id) {
+  for (const { value } of memo.values()) {
+    if (!value) continue;
+    const rows = value.rows || value.underdogs;
+    if (!Array.isArray(rows)) continue;
+    const row = rows.find(r => Array.isArray(r) && String(r[0]) === id);
+    if (row) return value.underdogs ? fightFromRow([row[0], row[1], row[2], row[3], row[4], row[5], null, row[6], row[7], row[8]]) : fightFromRow(row);
+  }
+  return null;
+}
+
+document.addEventListener("input", event => {
+  if (event.target.matches("[data-period]")) {
+    const h = PERIODS[Number(event.target.value)];
+    $$(".slider .ticks span").forEach((s, i) => s.classList.toggle("on", i === Number(event.target.value)));
+    clearTimeout(state.periodTimer);
+    state.periodTimer = setTimeout(() => { state.ui.shown = {}; setParams({ h }); }, 220);
+  }
+});
+
+document.addEventListener("mouseover", event => {
+  const el = event.target.closest(".pl[data-n], .fav[data-n]");
+  if (el && el !== popFor) showPopFor(el);
+});
+document.addEventListener("mouseout", event => {
+  const el = event.target.closest(".pl[data-n], .fav[data-n]");
+  if (el && !el.contains(event.relatedTarget)) hidePop();
+});
+
+document.addEventListener("keydown", event => {
+  if (event.key === "/" && !/input|textarea/i.test(document.activeElement.tagName)) {
+    event.preventDefault();
+    $("#q").focus();
+  }
+  if (event.key === "Escape") hidePop();
+});
+
+$("#bell").addEventListener("click", toggleBell);
+attachSuggest($("#q"), name => {
+  $("#q").value = "";
+  $("#q").blur();
+  location.hash = buildHash("player", name, {});
+});
+
+// ------------------------------------------------------------------
+// Start
+// ------------------------------------------------------------------
+
+async function startup() {
+  renderBell();
+  api.marks().then(m => {
+    if (!m) return;
+    for (const [k, v] of Object.entries(m)) durationMarks[k] = v;
+    // sizes without own numbers use the next smaller known size
+    for (let s = 2; s <= 8; s += 1) if (!m[s] && m[s - 1]) durationMarks[s] = durationMarks[s - 1];
+  }).catch(() => {});
+  api.dbInfo().then(info => {
+    $("#foot-db").textContent = `${fmt(info.fights)} fights · ${fmt(info.chars)} players · since ${fmtDay(new Date(info.first))}`;
+  }).catch(() => {});
+  api.pulse().then(p => updateLive(p.last)).catch(() => {});
+  await render();
+
+  // Background refresh: only while the page is visible
+  setInterval(() => {
+    if (document.hidden) return;
+    const page = state.route.page;
+    if (page === "over" || page === "fights" || page === "player") render({ silent: true });
+    if (page !== "over") api.feed(3, null, 400, true).then(d => watchFights((d.rows || []).map(fightFromRow))).catch(() => {});
+    api.pulse(true).then(p => updateLive(p.last)).catch(() => {});
+  }, REFRESH_MS);
+  document.addEventListener("visibilitychange", () => {
+    if (!document.hidden && state.route.page === "over") render({ silent: true });
+  });
+
+  if ("serviceWorker" in navigator && location.protocol === "https:") {
+    navigator.serviceWorker.register("sw.js").catch(() => {});
+  }
+}
+
+window.EFA = { VERSION, state, memo };
+startup();

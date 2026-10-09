@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      1.00
+// @version      1.01
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "1.00";
+  const VERSION = "1.01";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -5642,6 +5642,7 @@
           <div id="ewa-cache" class="ewa-muted">${subLabel}</div>
         </div>
         <div class="ewa-head-btns">
+          <a id="ewa-app" href="https://vumas169.github.io/Eden-Fight-Analyzer/" target="_blank" rel="noopener" title="Open the web app in its own window">App</a>
           ${detail ? "" : `<button id="ewa-wide" title="Wider panel">⇔</button>`}
           <button id="ewa-collapse" title="Collapse">−</button>
         </div>
@@ -5827,6 +5828,12 @@
         width: 26px; height: 26px; padding: 0; font-size: 15px; flex: none;
         background: rgba(42, 33, 24, .08) !important; color: var(--ink) !important; border-color: rgba(42, 33, 24, .3) !important;
       }
+      #ewa-app {
+        height: 26px; padding: 0 8px; display: inline-flex; align-items: center; font-size: 12px; font-weight: 700; flex: none;
+        border: 1px solid rgba(42, 33, 24, .3); border-radius: 4px; text-decoration: none;
+        background: rgba(42, 33, 24, .08); color: var(--ink);
+      }
+      #ewa-app:hover { background: rgba(42, 33, 24, .18); }
       #ewa-collapse:hover, #ewa-wide:hover { background: rgba(42, 33, 24, .18) !important; }
       #ewa-panel.is-wide { width: 1040px; }
       .ewa-mark { display: inline-flex; width: 12px; height: 12px; }

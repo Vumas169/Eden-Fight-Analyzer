@@ -1,5 +1,7 @@
 # Eden Fight Analyzer
 
+Web app: **https://vumas169.github.io/Eden-Fight-Analyzer/** (installable as an app in Chrome and Edge: install icon in the address bar)
+
 Tampermonkey userscript for the fight pages of [Eden DAoC](https://eden-daoc.net/fights).
 
 - **Overview**: fights today and in the last 24 hours, fights per hour, group sizes, zones, most kills, win streaks, underdog wins, most played classes, busy times over 30 days
