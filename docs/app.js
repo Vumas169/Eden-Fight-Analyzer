@@ -137,13 +137,53 @@ async function rpcOnce(fn, body) {
 }
 
 // Results are kept for ttl. A request that is still running is shared.
+// Results also go to the browser's storage: when a page is opened again,
+// the last result shows at once and the fresh one replaces it a moment later.
 const memo = new Map();
+const DISK = "efa-c:";
+const DISK_MAX_AGE = 12 * HOUR;
+function diskGet(key) {
+  const hit = store.get(DISK + key, null);
+  return hit && Date.now() - hit.t < DISK_MAX_AGE ? hit : null;
+}
+function diskSet(key, value) {
+  let text;
+  try { text = JSON.stringify({ t: Date.now(), value }); } catch (e) { return; }
+  if (text.length > 250000) return;
+  try { localStorage.setItem(DISK + key, text); }
+  catch (e) {
+    // storage full: drop the cached results and keep going
+    try { Object.keys(localStorage).filter(k => k.startsWith(DISK)).forEach(k => localStorage.removeItem(k)); } catch (e2) { /* blocked */ }
+  }
+}
+let rerenderTimer = null;
+function rerenderSoon() {
+  clearTimeout(rerenderTimer);
+  rerenderTimer = setTimeout(() => render({ silent: true }), 250);
+}
 function cached(key, ttl, loader, force = false) {
   const hit = memo.get(key);
   if (hit && hit.pending) return hit.pending;
   if (hit && !force && Date.now() - hit.t < ttl) return Promise.resolve(hit.value);
+  if (!hit && !force) {
+    const disk = diskGet(key);
+    if (disk) {
+      memo.set(key, { t: disk.t, value: disk.value });
+      if (Date.now() - disk.t >= ttl) {
+        const pending = loader().then(value => {
+          memo.set(key, { t: Date.now(), value });
+          diskSet(key, value);
+          if (JSON.stringify(value) !== JSON.stringify(disk.value)) rerenderSoon();
+          return value;
+        }).catch(() => { memo.set(key, { t: disk.t, value: disk.value }); });
+        memo.set(key, { t: disk.t, value: disk.value, refreshing: pending });
+      }
+      return Promise.resolve(disk.value);
+    }
+  }
   const pending = loader().then(value => {
     memo.set(key, { t: Date.now(), value });
+    diskSet(key, value);
     return value;
   }).catch(error => {
     if (hit && !hit.pending) memo.set(key, hit);
@@ -178,8 +218,16 @@ const api = {
   matrix: (h, s) => cached(`mx|${h}|${s}`, 5 * MINUTE, () => rpc("matchup_matrix", { p_hours: h, p_size: s || null })),
   leaderboard: (k, h, s, r, n, force) => cached(`lb|${k}|${h}|${s}|${r}|${n}`, 2 * MINUTE,
     () => rpc("leaderboard", { p_kind: k, p_hours: h || null, p_size: s || null, p_realm: r || null, p_limit: n }), force),
-  names: q => cached(`ns|${norm(q)}`, 5 * MINUTE, () => rpc("name_search", { p_q: q, p_limit: 8 }))
+  names: q => cached(`ns|${norm(q)}`, 5 * MINUTE, () => rpc("name_search", { p_q: q, p_limit: 8 })),
+  eloBoard: (bucket, kind, h, r, n) => cached(`eb|${bucket}|${kind}|${h}|${r}|${n}`, 2 * MINUTE,
+    () => rpc("elo_board", { p_bucket: bucket, p_kind: kind, p_hours: h || null, p_realm: r || null, p_limit: n })),
+  playerElo: name => cached(`pe|${norm(name)}`, 2 * MINUTE, () => rpc("player_elo", { p_name: name })),
+  fight: id => cached(`fg|${id}`, HOUR, () => rpc("fight_get", { p_id: id }))
 };
+
+// Elo brackets: 1 = solo (1v1), 2 = small (bigger side 2 to 5), 3 = group (6 and more)
+const BRACKETS = [[1, "Solo", "1v1"], [2, "Small", "bigger side 2 to 5"], [3, "Group", "bigger side 6 to 8+"]];
+const bracketName = b => (BRACKETS.find(x => x[0] === b) || [0, "?"])[1];
 
 // ------------------------------------------------------------------
 // Fights
@@ -313,10 +361,15 @@ async function hydrate(root) {
 
 const className = id => CLASS_NAMES[id] || (id ? `Class ${id}` : "Unknown");
 const roleOf = id => ROLE_OF[CLASS_NAMES[id]] || "Unknown";
+// Class symbols from the Fair Fights 1v1 site, loaded from there and cached
+// by the browser. Unknown classes fall back to a plain role symbol.
+const ICON_URL = name => `https://eden.solo-daoc.net/icons/${encodeURIComponent(name)}_class_icon.webp`;
 const classIcon = id => {
-  const role = roleOf(id);
-  return `<span class="ci role-${role.toLowerCase()}" title="${esc(className(id))}">${ICON[role]}</span>`;
+  const name = CLASS_NAMES[id];
+  if (!name) return `<span class="ci role-unknown" title="Unknown class">${ICON.Unknown}</span>`;
+  return `<img class="ci" src="${ICON_URL(name)}" alt="" title="${esc(name)}" loading="lazy" decoding="async">`;
 };
+const roleIcon = role => `<span class="ci role-${String(role || "Unknown").toLowerCase()}" title="${esc(role || "Unknown")}">${ICON[role] || ICON.Unknown}</span>`;
 const realmDot = r => (REALMS[r] ? `<span class="rm r${r}" title="${REALMS[r]}"></span>` : "");
 const classHtml = (id, realm) => `<span class="cls">${realm !== undefined ? realmDot(realm) : ""}${classIcon(id)}<span class="cn">${esc(className(id))}</span></span>`;
 
@@ -415,12 +468,12 @@ function parseHash() {
   const [path, query = ""] = raw.split("?");
   const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
   const page = parts[0] || "over";
-  const map = { "": "over", over: "over", fights: "fights", player: "player", classes: "classes", leaderboard: "lb", compare: "compare" };
+  const map = { "": "over", over: "over", fights: "fights", player: "player", classes: "classes", leaderboard: "lb", compare: "compare", report: "report" };
   return { page: map[page] || "over", arg: parts[1] || "", params: new URLSearchParams(query) };
 }
 
 function buildHash(page, arg, params) {
-  const names = { over: "", fights: "fights", player: "player", classes: "classes", lb: "leaderboard", compare: "compare" };
+  const names = { over: "", fights: "fights", player: "player", classes: "classes", lb: "leaderboard", compare: "compare", report: "report" };
   const q = new URLSearchParams();
   for (const [k, v] of Object.entries(params || {})) if (v !== "" && v !== null && v !== undefined && v !== false) q.set(k, v);
   const query = q.toString();
@@ -446,7 +499,7 @@ async function render(options = {}) {
   state.route = parseHash();
   const token = ++state.token;
   const page = state.route.page;
-  $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.nav === page || (page === "player" && a.dataset.nav === "fights")));
+  $$("#nav a").forEach(a => a.classList.toggle("on", a.dataset.nav === page || ((page === "player" || page === "report") && a.dataset.nav === "fights")));
   renderFavs();
   hidePop();
   if (page !== "player") document.title = "Eden Fight Analyzer";
@@ -611,7 +664,8 @@ function fightDetailHtml(f) {
       <div class="f-acts">
         <span>${fmtDay(f.date)} ${fmtClock(f.date)} · ${f.ws}v${f.ls} · ${fmtDur(f.secs)}${f.zone ? ` · ${esc(f.zone)}` : ""}</span>
         <span class="sp"></span>
-        <a class="btn sm" href="${EDEN_FIGHT_URL(f.id)}" target="_blank" rel="noopener">Fight report on Eden</a>
+        <a class="btn sm" href="#/report/${encodeURIComponent(f.id)}">Report</a>
+        <a class="btn sm" href="${EDEN_FIGHT_URL(f.id)}" target="_blank" rel="noopener">Open on Eden</a>
       </div>
     </div>`;
 }
@@ -667,6 +721,10 @@ async function copyText(text, button) {
   }
 }
 
+// Elo cursor "ts|id": calculated up to this fight
+const eloUpTo = cur => { const t = Date.parse(String(cur).split("|")[0]); return Number.isFinite(t) ? fmtDay(new Date(t)) : "-"; };
+const eloCaughtUp = cur => { const t = Date.parse(String(cur).split("|")[0]); return Number.isFinite(t) && Date.now() - t < 2 * HOUR; };
+
 const loadingHtml = () => `<div class="grid"><div class="skel h"></div><div class="skel t"></div></div>`;
 const appUrl = hash => `${location.origin}${location.pathname}${hash}`;
 
@@ -676,10 +734,14 @@ const appUrl = hash => `${location.origin}${location.pathname}${hash}`;
 
 VIEWS.over = async (ctx) => {
   if (!ctx.silent && !peek("pulse")) ctx.view.innerHTML = loadingHtml();
-  const [pulse, recentRaw, top] = await Promise.all([
+  const winsSpan = store.get("efa-ov-wins", "1h");
+  const gainBucket = store.get("efa-ov-gain", 1);
+  const [pulse, recentRaw, wins7, gains, streaks7] = await Promise.all([
     api.pulse(ctx.silent),
     api.feed(3, null, 400, ctx.silent),
-    api.leaderboard("rating", 168, null, null, 8).catch(() => null)
+    winsSpan === "7d" ? api.leaderboard("wins", 168, null, null, 8).catch(() => null) : null,
+    api.eloBoard(gainBucket, "gain", 168, 0, 8).catch(() => null),
+    api.leaderboard("streak", 168, null, null, 8).catch(() => null)
   ]);
   const heat = await api.heat().catch(() => null);
   if (!ctx.alive()) return;
@@ -698,7 +760,12 @@ VIEWS.over = async (ctx) => {
     .map(([t, c]) => ({ n: c, short: fmtClock(new Date(t)), label: `${fmtClock(new Date(t))}` }));
   const underdogs = (pulse.underdogs || []).map(([id, ts, ws, ls, wr, lr, w, l, zone]) => fightFromRow([id, ts, ws, ls, wr, lr, null, w, l, zone]));
   const solo = (pulse.sizes || []).find(([s]) => s === 1);
-  const lbRows = (top && top.rows) || [];
+  const winsList = winsSpan === "7d"
+    ? ((wins7 && wins7.rows) || []).map(r => ({ name: r.n, realm: r.r, n: r.w, sub: esc(className(r.c)) }))
+    : (pulse.kills_hour || []).map(([name, cls, realm, n]) => ({ name, realm, n, sub: esc(className(cls)) }));
+  const gainRows = (gains && gains.rows) || [];
+  const streakRows = ((streaks7 && streaks7.rows) || []).map(r => ({ name: r.n, realm: r.r, n: r.w, sub: esc(className(r.c)) }));
+  const miniSeg = (key, cur, opts) => `<span class="seg mini">${opts.map(([v, l]) => `<button class="${String(cur) === String(v) ? "on" : ""}" data-store="${key}" data-val="${v}">${l}</button>`).join("")}</span>`;
   const favList = favs();
 
   ctx.view.innerHTML = `
@@ -723,12 +790,19 @@ VIEWS.over = async (ctx) => {
       </div>
       <div class="stack">
         <div class="panel">
-          <h2>Top Elo · 7 days <em>1v1</em><a class="right more" href="#/leaderboard?k=rating&h=168">Leaderboard</a></h2>
-          ${lbRows.length ? `<div class="list">${lbRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${esc(className(r.c))}</span></span><span class="lv">${fmt(r.rating)}</span></div>`).join("")}</div>` : `<div class="empty">The Elo ranking is being calculated.</div>`}
+          <h2>Most wins ${miniSeg("efa-ov-wins", winsSpan, [["1h", "1 h"], ["7d", "7 days"]])}<a class="right more" href="#/leaderboard?k=wins&h=168">More</a></h2>
+          ${oppListHtml(winsList.slice(0, 8), "n", "")}
+        </div>
+        <div class="panel">
+          <h2>Elo gain · 7 days ${miniSeg("efa-ov-gain", gainBucket, BRACKETS.map(([v, l]) => [v, l]))}<a class="right more" href="#/leaderboard?k=gain&b=${gainBucket}&h=168">More</a></h2>
+          ${gainRows.length ? `<div class="list">${gainRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${fmt(r.rating)} · ${r.w}-${r.l}</span></span><span class="lv w">+${fmt(r.gain)}</span></div>`).join("")}</div>`
+            : `<div class="empty">${gains && gains.cur && !eloCaughtUp(gains.cur) ? `The Elo is still being calculated (up to ${esc(eloUpTo(gains.cur))}).` : "No data yet."}</div>`}
+        </div>
+        <div class="panel">
+          <h2>Win streaks · 7 days<a class="right more" href="#/leaderboard?k=streak&h=168">More</a></h2>
+          ${oppListHtml(streakRows, "n", "W")}
         </div>
         ${favList.length ? `<div class="panel" id="fav-panel"><h2>Your favorites</h2><div class="list">${favList.map(n => `<div class="li" data-favcard="${esc(n)}"><span class="lm">${nameHtml(n)}</span><span class="ls"><span class="spin"></span></span></div>`).join("")}</div></div>` : ""}
-        <div class="panel"><h2>Most kills · last hour</h2>${people(pulse.kills_hour, "")}</div>
-        <div class="panel"><h2>Win streaks · 24 h</h2>${people(pulse.streaks, "W")}</div>
       </div>
     </div>
 
@@ -895,8 +969,13 @@ VIEWS.player = async (ctx, route) => {
   const since = hours ? Date.now() - hours * HOUR : 0;
   const rows = all.filter(r => r.fight.date.getTime() >= since && (!size || capSize(r.size) === size));
 
-  const profile = await api.profile(realName, hours || null, size).catch(() => null);
+  const [profile, elos] = await Promise.all([
+    api.profile(realName, hours || null, size).catch(() => null),
+    api.playerElo(realName).catch(() => [])
+  ]);
   if (!ctx.alive()) return;
+  // [bucket, rating, rank, peak, games, wins, losses, gain 7 days]
+  const eloOf = b => (elos || []).find(e => e[0] === b);
 
   const cls = card && card.class;
   const realm = card && card.realm;
@@ -958,7 +1037,7 @@ VIEWS.player = async (ctx, route) => {
     const lines = [
       `**${realName}**${cls ? ` (${className(cls)}, ${REALM_SHORT[realm] || "?"})` : ""} · ${periodLabel(hours)} · ${sizeLabel(size)}`,
       `${fmt1(pct(wins, n))}% win rate · ${fmt(n)} fights (${fmt(wins)} W / ${fmt(n - wins)} L) · current ${st.now}`,
-      r ? `Elo ${fmt(r.rating)} (#${fmt(r.rank)}, peak ${fmt(r.peak)})` : "",
+      (elos || []).length ? `Elo ${(elos || []).map(e => `${bracketName(e[0])} ${fmt(e[1])}${e[2] ? ` (#${fmt(e[2])})` : ""}`).join(" · ")}` : "",
       appUrl(buildHash("player", realName, {}))
     ].filter(Boolean);
     return lines.join("\n");
@@ -986,9 +1065,13 @@ VIEWS.player = async (ctx, route) => {
     </div>
 
     <div class="tiles" style="margin-top:16px">
-      ${tile("Elo (1v1)", r ? fmt(r.rating) : "-", r ? `rank ${fmt(r.rank)}` : "from 20 solo fights")}
-      ${tile("Peak Elo", r ? fmt(r.peak) : "-", "")}
-      ${tile("1v1 record", r ? `<span class="w">${fmt(r.wins)}</span> / <span class="l">${fmt(r.losses)}</span>` : "-", r ? `${fmt1(pct(r.wins, r.games))}% of ${fmt(r.games)}` : "")}
+      ${BRACKETS.map(([b, label, hint]) => {
+        const e = eloOf(b);
+        if (!e) return tile(`Elo ${label}`, "-", `no ${label.toLowerCase()} fights`);
+        const [, rating, rank, peak, games, w, l, gain] = e;
+        const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}"><span>Elo ${label}</span><strong>${fmt(rating)}</strong><em>${rank ? `rank ${fmt(rank)}` : `${fmt(games)} of 20 fights`}${g}</em></div>`;
+      }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
     </div>
@@ -1207,6 +1290,17 @@ VIEWS.classes = async (ctx, route) => {
     body = `
       <div class="panel" style="margin-top:16px">
         <h2>Class quality <em>how good are the players of a class</em></h2>
+        <div class="explain">
+          <p>The normal win rate mixes two things: how strong a class is and how good the people are who play it. A class with many beginners looks weak, a class played by a few veterans looks strong. This view separates that a bit.</p>
+          <ul>
+            <li><b>Mid 80%</b>: win rate of the class without its best 10% and its worst 10% of players. The best single number to compare classes.</li>
+            <li><b>Player avg</b>: every player counts the same, no matter how many fights. High means many players of this class win.</li>
+            <li><b>Fight WR</b>: all fights together. Players with many fights weigh more.</li>
+            <li><b>Gap</b>: player avg minus fight WR. Strongly positive: a few very active players lose a lot and pull the class down. Strongly negative: a few very active players carry the class.</li>
+            <li><b>Avg Elo</b>: average solo Elo of the players of this class.</li>
+          </ul>
+          <p>Only players with at least 20 fights and 5 wins in the season count. Click a class for its opponents and players.</p>
+        </div>
         ${list.length ? `<div class="tbl-wrap"><table class="tbl">
           <thead><tr>${th("q", "label", "Class", false)}${th("q", "mid80", "Mid 80%", true, "Fight-weighted win rate without the best and worst 10% of players")}${th("q", "playerAvg", "Player avg", true, "Every player counts the same")}${th("q", "fightWr", "Fight WR", true, "All fights of the qualifying players")}${th("q", "gap", "Gap", true, "Player avg minus fight WR")}${th("q", "players", "Players")}${th("q", "fights", "Fights")}${th("q", "rating", "Avg Elo", true, "Average 1v1 Elo of the class")}</tr></thead>
           <tbody>${sortList(list, "q").map(x => `
@@ -1214,10 +1308,10 @@ VIEWS.classes = async (ctx, route) => {
               <td>${classHtml(x.c, x.r)}</td>
               <td class="num">${x.mid80 == null ? "-" : `<b>${fmt1(x.mid80)}%</b>${rateBar(x.mid80)}`}</td>
               <td class="num">${pctOr(x.playerAvg)}</td><td class="num">${pctOr(x.fightWr)}</td>
-              <td class="num ${x.gap > 2 ? "w" : x.gap < -2 ? "l" : ""}">${x.gap == null ? "-" : `${x.gap > 0 ? "+" : ""}${fmt1(x.gap)}`}</td>
+              <td class="num ${Math.abs(x.gap) > 2 ? "gold" : ""}">${x.gap == null ? "-" : `${x.gap > 0 ? "+" : ""}${fmt1(x.gap)}`}</td>
               <td class="num">${fmt(x.players)}</td><td class="num">${fmt(x.fights)}</td><td class="num">${x.rating ? fmt(x.rating) : "-"}</td>
             </tr>`).join("")}</tbody></table></div>` : `<div class="empty">No data for this selection yet.</div>`}
-        <div class="note">Only players with at least 20 fights and 5 wins in the season count, so a few beginners do not drag a class down. Mid 80% leaves out the best and the worst 10% of players and is the fairest single number. A big gap means a few players with many fights pull the class down (or up).</div>
+
       </div>`;
   } else {
     const rows = await api.matrix(hours, size);
@@ -1269,51 +1363,62 @@ VIEWS.classes = async (ctx, route) => {
 // View: Leaderboard
 // ------------------------------------------------------------------
 
-const LB_KINDS = [["rating", "Elo"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
+const LB_KINDS = [["elo", "Elo"], ["gain", "Elo gain"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
 
 VIEWS.lb = async (ctx, route) => {
   const p = route.params;
-  const kind = LB_KINDS.some(([k]) => k === p.get("k")) ? p.get("k") : "rating";
-  const hours = LB_PERIODS.some(([h]) => String(h) === p.get("h")) ? Number(p.get("h")) : 168;
+  let kind = p.get("k") === "rating" ? "elo" : p.get("k");
+  if (!LB_KINDS.some(([k]) => k === kind)) kind = "elo";
+  const isElo = kind === "elo" || kind === "gain";
+  const bucket = [1, 2, 3].includes(Number(p.get("b"))) ? Number(p.get("b")) : 1;
+  const periods = kind === "gain" ? LB_PERIODS.filter(([h]) => h && h <= 720) : LB_PERIODS;
+  let hours = periods.some(([h]) => String(h) === p.get("h")) ? Number(p.get("h")) : 168;
   const size = sizeParam(p);
   const realm = [1, 2, 3].includes(Number(p.get("r"))) ? Number(p.get("r")) : 0;
   const limit = p.get("n") === "100" ? 100 : 25;
   const head = `
-    <div class="page-head"><div><h1>Leaderboard</h1><p>The best players by Elo, wins, win rate, activity, underdog wins and streaks.</p></div></div>
+    <div class="page-head"><div><h1>Leaderboard</h1><p>Elo in three brackets, Elo gain, wins, win rate, activity, underdog wins and streaks.</p></div></div>
     <div class="ctrls panel">
       <div class="ctrl"><label>Ranking</label>${segHtml("k", kind, LB_KINDS)}</div>
-      <div class="ctrl"><label>Period</label>${segHtml("h", hours, LB_PERIODS)}</div>
-      ${kind !== "rating" ? `<div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS)}</div>` : ""}
+      ${isElo ? `<div class="ctrl"><label>Bracket</label>${segHtml("b", bucket, BRACKETS.map(([v, l, t]) => [v, l, t]))}</div>` : ""}
+      <div class="ctrl"><label>Period</label>${segHtml("h", hours, periods)}</div>
+      ${!isElo ? `<div class="ctrl"><label>Group</label>${segHtml("s", size, SIZE_OPTIONS)}</div>` : ""}
       <div class="ctrl"><label>Realm</label>${segHtml("r", realm, REALM_OPTIONS)}</div>
     </div>`;
-  if (!ctx.silent && !peek(`lb|${kind}|${hours}|${kind === "rating" ? 0 : size}|${realm}|${limit}`)) ctx.view.innerHTML = head + loadingHtml();
-  const data = await api.leaderboard(kind, hours, kind === "rating" ? 0 : size, realm, limit);
+  if (!ctx.silent) ctx.view.innerHTML = head + loadingHtml();
+  const data = isElo
+    ? await api.eloBoard(bucket, kind === "elo" ? "rating" : "gain", hours, realm, limit)
+    : await api.leaderboard(kind, hours, size, realm, limit);
   if (!ctx.alive()) return;
   const rows = (data && data.rows) || [];
   const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
-    rating: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    gain: [["Elo gain", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
     winrate: [["Win rate", r => rate(r.w, r.l)], ["W / L", wl], ["Fights", r => fmt(r.w + r.l)]],
     active: [["Fights", r => fmt(r.w + r.l)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    underdog: [["Underdog wins", r => fmt(r.w)], ["Biggest gap", r => (r.fid ? `<a class="pl" href="${EDEN_FIGHT_URL(r.fid)}" target="_blank" rel="noopener" title="Fight report on Eden">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`)]],
+    underdog: [["Underdog wins", r => fmt(r.w)], ["Biggest gap", r => (r.fid ? `<a class="pl" href="#/report/${encodeURIComponent(r.fid)}" title="Open this fight">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`)]],
     streak: [["Longest streak", r => `${fmt(r.w)}W`]]
   }[kind];
+  const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
-    rating: "Elo from 1v1 fights only, starting at 1500, K 32 for the first 30 fights, then 16. Listed from 20 fights, active in the chosen period.",
+    elo: `Elo per bracket: Solo = 1v1, Small = bigger side 2 to 5, Group = bigger side 6 and more. Group fights count team average against team average. Start 1500, K 32 for the first 30 fights of a bracket, then 16. Listed from 20 fights, active in the chosen period.`,
+    gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
     streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
   }[kind] || "";
 
   ctx.view.innerHTML = `${head}
+    ${building ? `<div class="warn" style="margin-bottom:16px"><span>The Elo is still being calculated from all fights since the start of the season, currently up to ${esc(eloUpTo(data.cur))}. The numbers grow into place over the next minutes.</span></div>` : ""}
     <div class="panel">
       ${rows.length ? `<div class="tbl-wrap"><table class="tbl">
         <thead><tr><th>#</th><th>Player</th><th>Class</th>${cols.map(([l]) => `<th class="num">${l}</th>`).join("")}</tr></thead>
         <tbody>${rows.map((r, i) => `
-          <tr class="${i < 3 ? `top${i + 1}` : ""}"><td class="rank-c">${i + 1}</td><td>${realmDot(r.r)}${nameHtml(r.n)}</td><td>${r.c ? classHtml(r.c) : ""}</td>${cols.map(([, f], k) => `<td class="num ${k === 0 ? "main" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")}</tbody>
+          <tr class="${i < 3 ? `top${i + 1}` : ""}"><td class="rank-c">${i + 1}</td><td>${realmDot(r.r)}${nameHtml(r.n)}</td><td class="muted">${r.c ? esc(className(r.c)) : ""}</td>${cols.map(([, f], k) => `<td class="num ${k === 0 ? "main" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")}</tbody>
       </table></div>
       ${limit < 100 && rows.length >= 25 ? `<button class="btn full" data-set="n=100">Show top 100</button>` : ""}` : `<div class="empty">No players for this selection yet.</div>`}
       ${note ? `<div class="note">${note}</div>` : ""}
@@ -1347,9 +1452,10 @@ VIEWS.compare = async (ctx, route) => {
     return;
   }
   if (!ctx.silent) ctx.view.innerHTML = head + loadingHtml();
-  const [feedA, cardA, cardB, profA, profB] = await Promise.all([
+  const [feedA, cardA, cardB, profA, profB, eloA, eloB] = await Promise.all([
     api.playerFeed(a), api.card(a).catch(() => null), api.card(b).catch(() => null),
-    api.profile(a, null, 0).catch(() => null), api.profile(b, null, 0).catch(() => null)
+    api.profile(a, null, 0).catch(() => null), api.profile(b, null, 0).catch(() => null),
+    api.playerElo(a).catch(() => []), api.playerElo(b).catch(() => [])
   ]);
   if (!ctx.alive()) return;
   const nameA = (cardA && cardA.name) || a;
@@ -1402,10 +1508,13 @@ VIEWS.compare = async (ctx, route) => {
     <div class="grid g2" style="margin-top:16px">
       <div class="panel">
         <h2>Numbers</h2>
-        ${line("Elo (1v1)", ra ? fmt(ra.rating) : "-", rb ? fmt(rb.rating) : "-", [ra && ra.rating, rb && rb.rating])}
-        ${line("Rank", ra ? `#${fmt(ra.rank)}` : "-", rb ? `#${fmt(rb.rank)}` : "-", [ra && ra.rank, rb && rb.rank], false)}
-        ${line("Peak Elo", ra ? fmt(ra.peak) : "-", rb ? fmt(rb.peak) : "-", [ra && ra.peak, rb && rb.peak])}
-        ${line("1v1 win rate", ra ? `${fmt1(pct(ra.wins, ra.games))}%` : "-", rb ? `${fmt1(pct(rb.wins, rb.games))}%` : "-", [ra && pct(ra.wins, ra.games), rb && pct(rb.wins, rb.games)])}
+        ${BRACKETS.map(([bk, label]) => {
+          const ea = (eloA || []).find(e => e[0] === bk);
+          const eb = (eloB || []).find(e => e[0] === bk);
+          if (!ea && !eb) return "";
+          const show = e => (e ? `${fmt(e[1])}${e[2] ? ` <span class="sub">#${fmt(e[2])}</span>` : ""}` : "-");
+          return line(`Elo ${label}`, show(ea), show(eb), [ea && ea[1], eb && eb[1]]);
+        }).join("")}
         ${line("All fights", fmt(tot(cardA)), fmt(tot(cardB)), [tot(cardA), tot(cardB)])}
         ${line("Win rate all", cardA ? `${fmt1(pct(cardA.wins, tot(cardA)))}%` : "-", cardB ? `${fmt1(pct(cardB.wins, tot(cardB)))}%` : "-", [cardA && pct(cardA.wins, tot(cardA)), cardB && pct(cardB.wins, tot(cardB))])}
         ${line("Last 7 days", cardA ? `${cardA.wins7} / ${cardA.losses7}` : "-", cardB ? `${cardB.wins7} / ${cardB.losses7}` : "-", [rate7(cardA), rate7(cardB)])}
@@ -1438,6 +1547,192 @@ VIEWS.compare = async (ctx, route) => {
   `;
   wire();
 };
+
+// ------------------------------------------------------------------
+// View: Fight report
+// The full report comes from the userscript on Eden's fight page (button
+// "Open in Fight Analyzer"). Without it the app shows what the database
+// knows: both line-ups, duration and zone.
+// ------------------------------------------------------------------
+
+const REPORT_PREFIX = "efa-report:";
+const REALM_ID = { Albion: 1, Midgard: 2, Hibernia: 3 };
+const ROLE_ORDER = ["Caster", "Tank", "Stealth", "Support"];
+const CLASS_ID = Object.fromEntries(Object.entries(CLASS_NAMES).map(([id, name]) => [name, Number(id)]));
+
+function saveReport(report) {
+  if (!report || !report.id) return;
+  store.set(REPORT_PREFIX + report.id, { t: Date.now(), r: report });
+  // keep the newest 15
+  try {
+    const keys = Object.keys(localStorage).filter(k => k.startsWith(REPORT_PREFIX))
+      .map(k => [k, (store.get(k, {}) || {}).t || 0]).sort((a, b) => b[1] - a[1]);
+    keys.slice(15).forEach(([k]) => localStorage.removeItem(k));
+  } catch (e) { /* storage blocked */ }
+}
+const loadReport = id => (store.get(REPORT_PREFIX + id, null) || {}).r || null;
+
+const short = n => (n >= 1e6 ? `${fmt1(n / 1e6)}m` : n >= 1000 ? `${fmt1(n / 1000)}k` : fmt(n));
+
+function duelHtml(rows) {
+  return `<div class="duel">${rows.map(r => {
+    const max = Math.max(r.left, r.right, 1);
+    const lLead = r.invert ? r.left < r.right : r.left > r.right;
+    const rLead = r.invert ? r.right < r.left : r.right > r.left;
+    const show = r.short ? short : fmt;
+    return `
+      <div class="duel-row"${r.hint ? ` title="${esc(r.hint)}"` : ""}>
+        <span class="dv ${lLead ? "lead" : ""}">${show(r.left)}${r.leftNote ? `<i>${esc(r.leftNote)}</i>` : ""}</span>
+        <div class="dm">
+          <span class="dn">${esc(r.label)}</span>
+          <div class="db"><div class="half l"><span style="width:${(r.left / max * 100).toFixed(1)}%"></span></div><div class="half r"><span style="width:${(r.right / max * 100).toFixed(1)}%"></span></div></div>
+          ${r.sub ? `<span class="ds">${esc(r.sub)}</span>` : ""}
+        </div>
+        <span class="dv ${rLead ? "lead" : ""}">${show(r.right)}${r.rightNote ? `<i>${esc(r.rightNote)}</i>` : ""}</span>
+      </div>`;
+  }).join("")}</div>`;
+}
+
+function compHtml(side) {
+  const c = side.comp || {};
+  const roles = (c.roles || []).map(([role, n]) => `<span class="role-stat">${roleIcon(role)}<b>${n}</b> ${esc(role)}</span>`).join("");
+  const chips = (c.groups || []).map(g => `<span class="cchip">${CLASS_ID[g.cls] ? classIcon(CLASS_ID[g.cls]) : roleIcon(g.role)}${g.count > 1 ? `<b>${g.count}×</b>` : ""}${esc(g.cls)}</span>`).join("");
+  return `
+    <div class="comp-side">
+      <div class="comp-line"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "W" : "L"}</span>${realmDot(REALM_ID[c.realm])}<span class="muted">${esc(c.realm || "?")}</span>${roles}${c.unknown ? `<span class="role-stat">${roleIcon("Unknown")}<b>${c.unknown}</b> unknown</span>` : ""}</div>
+      <div class="comp-chips">${chips || '<span class="muted">-</span>'}</div>
+      ${(c.core || []).length ? `<div class="comp-core">Support core: ${c.core.map(esc).join(" · ")}</div>` : ""}
+    </div>`;
+}
+
+function rosterHtml(side) {
+  const players = side.players || [];
+  const team = k => players.reduce((sum, p) => sum + ((p.stats || {})[k] || 0), 0);
+  const tDmg = team("dd");
+  const tHeal = team("hd");
+  const topDmg = Math.max(...players.map(p => (p.stats || {}).dd || 0), 0);
+  const topHeal = Math.max(...players.map(p => (p.stats || {}).hd || 0), 0);
+  const big = n => (n >= 1000 ? short(n) : null);
+  const sorted = [...players].sort((a, b) => ((b.stats || {}).dd || 0) - ((a.stats || {}).dd || 0) || b.points - a.points);
+  const realm = REALM_ID[(side.comp || {}).realm];
+  return `
+    <div class="roster">
+      <h3 class="${side.won ? "w" : "l"}">${side.won ? "Winners" : "Losers"} ${realmDot(realm)}<span class="sub">${players.length}</span></h3>
+      ${sorted.map(p => {
+        const st = p.stats || {};
+        const id = p.clsId || CLASS_ID[p.cls];
+        const cc = [["tm", "mez"], ["ts", "stun"], ["tr", "root"], ["ta", "peel"], ["ti", "rupt"], ["br", "shear"], ["td", "disease"], ["tn", "ns"]]
+          .filter(([k]) => st[k]).map(([k, l]) => `<span><b>${fmt(st[k])}</b> ${l}</span>`).join("");
+        const dShare = tDmg && st.dd >= 1000 ? Math.round(st.dd / tDmg * 100) : 0;
+        const hShare = tHeal && st.hd >= 1000 ? Math.round(st.hd / tHeal * 100) : 0;
+        return `
+          <div class="rp">
+            <div class="rp-top">
+              ${id ? classIcon(id) : roleIcon(p.role)}
+              ${nameHtml(p.name)}${p.name === side.leader ? '<span class="lead-mark" title="Group leader">★</span>' : ""}
+              <span class="sub">${esc(p.cls || "unknown")}</span>
+              ${st.dd && st.dd === topDmg && players.length > 1 ? '<span class="mvp" title="Most damage of the side">top dmg</span>' : ""}
+              ${st.hd && st.hd === topHeal && players.length > 1 && st.hd >= 1000 ? '<span class="mvp heal" title="Most healing of the side">top heal</span>' : ""}
+              <span class="rr" title="${fmt(p.points)} realm rank steps">${esc(p.rank || "")}</span>
+            </div>
+            <div class="rp-nums">
+              ${big(st.dd) ? `<span title="Damage done"><b class="dmg">${big(st.dd)}</b> dmg${dShare ? `<i>${dShare}%</i>` : ""}</span>` : ""}
+              ${big(st.dt) ? `<span title="Damage taken"><b>${big(st.dt)}</b> taken</span>` : ""}
+              ${big(st.hd) ? `<span title="Healing done"><b class="heal">${big(st.hd)}</b> heal${hShare ? `<i>${hShare}%</i>` : ""}</span>` : ""}
+              ${big(st.hr) ? `<span title="Healing received"><b>${big(st.hr)}</b> recv</span>` : ""}
+              ${cc}
+              ${st.d ? `<span class="l" title="Deaths">✝ ${st.d}</span>` : ""}
+            </div>
+          </div>`;
+      }).join("")}
+    </div>`;
+}
+
+VIEWS.report = async (ctx, route) => {
+  const id = String(route.arg || "").toLowerCase();
+  if (!/^[0-9a-z]{1,10}$/.test(id)) { ctx.view.innerHTML = `<div class="panel"><div class="empty">No fight id.</div></div>`; return; }
+  const report = loadReport(id);
+  if (!report && window.opener && !state.ui.askedOpener) {
+    state.ui.askedOpener = true;
+    try { window.opener.postMessage({ type: "efa-ready", id }, "*"); } catch (e) { /* no opener */ }
+  }
+  if (!ctx.silent) ctx.view.innerHTML = loadingHtml();
+  const row = await api.fight(id).catch(() => null);
+  if (!ctx.alive()) return;
+  const f = row ? fightFromRow(row) : null;
+  if (f) await loadChars([...f.winners, ...f.losers]);
+  if (!ctx.alive()) return;
+
+  const date = f ? f.date : report && report.t ? new Date(report.t) : null;
+  const secs = report && report.d != null ? report.d : f ? f.secs : null;
+  const size = f ? bigSide(f) : report ? Math.max((report.win.players || []).length, (report.loss.players || []).length) : 1;
+  const dc = durClass(secs, size);
+  const matchup = report ? report.matchup : f ? `${f.ws}v${f.ls}` : "";
+  const head = `
+    <div class="page-head">
+      <div>
+        <h1>Fight report <span class="muted">${esc(matchup)}</span></h1>
+        <p>${date ? `${fmtDay(date)} ${fmtClock(date)}` : ""}${secs != null ? ` · <span class="${dc}">${fmtDur(secs)}</span>` : ""}${f && f.zone ? ` · ${esc(f.zone)}` : ""}</p>
+      </div>
+      <div class="acts">
+        <button class="btn" data-act="share" data-url="${esc(appUrl(`#/report/${id}`))}">Copy link</button>
+        <a class="btn" href="${EDEN_FIGHT_URL(id)}" target="_blank" rel="noopener">Open on Eden</a>
+      </div>
+    </div>`;
+
+  if (!report) {
+    const side = (names, realm, won) => `
+      <div class="roster">
+        <h3 class="${won ? "w" : "l"}">${won ? "Winners" : "Losers"} ${realmDot(realm)}<span class="sub">${names.length}</span></h3>
+        ${names.map(n => { const i = chars.get(n); return `<div class="rp"><div class="rp-top">${i && i.c ? classIcon(i.c) : roleIcon("Unknown")}${nameHtml(n)}<span class="sub">${i && i.c ? esc(className(i.c)) : ""}</span></div></div>`; }).join("")}
+      </div>`;
+    ctx.view.innerHTML = `${head}
+      <div class="explain"><p>Damage, healing, crowd control and realm ranks come from Eden's fight page. Open this fight on Eden with the userscript installed and click "Open in Fight Analyzer" at the top right. The full report then shows up here.</p></div>
+      ${f ? `<div class="grid g2">${side(f.winners, f.wr, true)}${side(f.losers, f.lr, false)}</div>` : `<div class="panel"><div class="empty">This fight is not in the database.</div></div>`}`;
+    return;
+  }
+
+  const t = report.totals || { 1: {}, 2: {} };
+  const ra = report.ra || [0, 0, "", ""];
+  const rez = side => (t[side] && t[side].rn ? `${t[side].rn} rez` : "");
+  const hero = side => {
+    const names = (side.players || []).map(p => p.name);
+    const lead = names.indexOf(side.leader);
+    if (lead > 0) names.unshift(names.splice(lead, 1)[0]);
+    return `
+      <div class="hero-side ${side.won ? "is-win" : "is-loss"}">
+        <div class="hs-head"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "Victory" : "Defeat"}</span>${realmDot(REALM_ID[(side.comp || {}).realm])}<span class="muted">${esc((side.comp || {}).realm || "?")}</span><span class="right sub">${names.length} players</span></div>
+        <div class="hs-names">${names.map(nameHtml).join(" ")}</div>
+      </div>`;
+  };
+
+  ctx.view.innerHTML = `${head}
+    <div class="vs-head">${hero(report.win)}<span class="vs">vs</span>${hero(report.loss)}</div>
+    <div class="panel" style="margin-top:16px"><h2>Comp</h2>${compHtml(report.win)}${compHtml(report.loss)}</div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel"><h2>Totals <em>winners left, losers right</em></h2>${duelHtml([
+        { label: "Damage", left: t[1].dd || 0, right: t[2].dd || 0, short: true },
+        { label: "Healing", left: t[1].hd || 0, right: t[2].hd || 0, short: true },
+        { label: "Deaths", left: t[1].d || 0, right: t[2].d || 0, invert: true, leftNote: rez(1), rightNote: rez(2) },
+        { label: "Realm ranks", left: ra[0] || 0, right: ra[1] || 0, sub: `Ø ${ra[2]} vs ${ra[3]}`, hint: "Sum of realm rank steps" }
+      ])}</div>
+      <div class="panel"><h2>Crowd control and support</h2>${duelHtml((report.cc || []).map(([label, l, r]) => ({ label, left: l, right: r })))}</div>
+    </div>
+    <div class="grid g2" style="margin-top:16px">
+      <div class="panel">${rosterHtml(report.win)}</div>
+      <div class="panel">${rosterHtml(report.loss)}</div>
+    </div>
+    <div class="note">Damage and healing from 1k. Percent: share of the own side.</div>`;
+};
+
+window.addEventListener("message", event => {
+  if (!/^https:\/\/(www\.)?eden-daoc\.net$/.test(event.origin)) return;
+  const data = event.data;
+  if (!data || data.type !== "efa-report" || !data.report || !data.report.id) return;
+  saveReport(data.report);
+  if (state.route.page === "report" && String(state.route.arg).toLowerCase() === String(data.report.id).toLowerCase()) render();
+  else location.hash = `#/report/${encodeURIComponent(data.report.id)}`;
+});
 
 // ------------------------------------------------------------------
 // Name suggestions
@@ -1583,6 +1878,14 @@ document.addEventListener("click", event => {
     return;
   }
 
+  const st = t.closest("[data-store]");
+  if (st) {
+    const v = st.dataset.val;
+    store.set(st.dataset.store, /^\d+$/.test(v) ? Number(v) : v);
+    render({ keepScroll: true });
+    return;
+  }
+
   const act = t.closest("[data-act]");
   if (act) {
     const a = act.dataset.act;
@@ -1663,6 +1966,32 @@ document.addEventListener("keydown", event => {
 });
 
 $("#bell").addEventListener("click", toggleBell);
+$("#reload").addEventListener("click", () => {
+  for (const [k, v] of memo) if (!v.pending) memo.delete(k);
+  const btn = $("#reload");
+  btn.classList.add("spinning");
+  render({ keepScroll: true }).finally(() => setTimeout(() => btn.classList.remove("spinning"), 300));
+});
+
+// A new version of the app: say so once, reloading picks it up
+const APP_V = (document.querySelector('script[src*="app.js"]') || {}).src?.match(/v=(\d+)/)?.[1] || "";
+let versionShown = false;
+async function checkVersion() {
+  if (versionShown || !APP_V) return;
+  try {
+    const html = await (await fetch(`index.html?check=${Date.now()}`, { cache: "no-store" })).text();
+    const live = (html.match(/app\.js\?v=(\d+)/) || [])[1];
+    if (live && live !== APP_V) {
+      versionShown = true;
+      const el = document.createElement("div");
+      el.className = "toast";
+      el.innerHTML = `<b>New version available</b><div class="sub">Click to reload the app.</div>`;
+      el.addEventListener("click", () => location.reload());
+      $("#toasts").appendChild(el);
+    }
+  } catch (e) { /* offline */ }
+}
+setInterval(checkVersion, 10 * MINUTE);
 attachSuggest($("#q"), name => {
   $("#q").value = "";
   $("#q").blur();

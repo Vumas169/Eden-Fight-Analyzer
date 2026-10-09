@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      1.01
+// @version      1.02
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "1.01";
+  const VERSION = "1.02";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -3045,6 +3045,7 @@
     let fromPage = false;
 
     setStatus("Loading fight data ...");
+    renderAppButton();
 
     try {
       ({ group1, group2, stats, totals, fight, matchup } = await detailFromJson());
@@ -3096,6 +3097,8 @@
     const comp2 = compInfo(group2);
     const compFound = comp1.known + comp2.known > 0;
 
+    if (!fromPage) rememberReport({ group1, group2, comp1, comp2, stats, totals, fight, matchup, sum1, sum2 });
+
     if (!compFound) {
       warnings.push("No classes detected, so the comp overview is missing.");
     } else if (comp1.known < sum1.count || comp2.known < sum2.count) {
@@ -3132,6 +3135,75 @@
     `;
 
     setStatus("");
+  }
+
+  // ---------------------------------------------------------------
+  // Fight report in the web app: the report data goes to the app window
+  // by postMessage, so the app never has to ask Eden itself.
+  // ---------------------------------------------------------------
+
+  const APP_URL = "https://vumas169.github.io/Eden-Fight-Analyzer/";
+  const APP_ORIGIN = "https://vumas169.github.io";
+  let lastReport = null;
+
+  function rememberReport(r) {
+    const compOut = c => ({ realm: c.realm, roles: c.roles, groups: c.groups, core: c.core, unknown: c.unknown });
+    const side = (players, comp, won, raw) => ({
+      won,
+      size: raw ? raw.s : players.length,
+      leader: raw ? raw.l || "" : "",
+      comp: compOut(comp),
+      players: players.map(p => ({
+        name: p.name, cls: p.cls, clsId: p.clsId, race: p.race, rank: p.rankLabel, points: p.points,
+        role: p.cls ? comp.roleFn(p.cls) : "Unknown", stats: p.stats
+      }))
+    });
+    const id = new URLSearchParams(location.search).get("id");
+    lastReport = {
+      v: 1, id, t: r.fight && r.fight.t, d: r.fight ? r.fight.d : null,
+      matchup: r.matchup ? r.matchup.label : "",
+      win: side(r.group1, r.comp1, true, r.fight && r.fight.a),
+      loss: side(r.group2, r.comp2, false, r.fight && r.fight.b),
+      cc: STAT_LABELS.map(label => [label.replace(/^Targets /, ""), r.stats[1][label] || 0, r.stats[2][label] || 0]),
+      totals: r.totals,
+      ra: [r.sum1.total, r.sum2.total, r.sum1.label, r.sum2.label]
+    };
+    renderAppButton();
+  }
+
+  function openReportInApp() {
+    if (!lastReport) return;
+    const report = lastReport;
+    const win = window.open(`${APP_URL}#/report/${encodeURIComponent(report.id)}`, "efa-app");
+    if (!win) return;
+    let sent = false;
+    const onMessage = event => {
+      if (event.origin !== APP_ORIGIN || !event.data || event.data.type !== "efa-ready") return;
+      win.postMessage({ type: "efa-report", report }, APP_ORIGIN);
+      sent = true;
+      window.removeEventListener("message", onMessage);
+    };
+    window.addEventListener("message", onMessage);
+    // the app may already be open in that window and not announce itself
+    // again, so the data also goes out a few times blindly
+    [800, 2000, 4000].forEach(ms => setTimeout(() => {
+      if (!sent) { try { win.postMessage({ type: "efa-report", report }, APP_ORIGIN); } catch (e) { /* closed */ } }
+    }, ms));
+    setTimeout(() => window.removeEventListener("message", onMessage), 15 * SECOND);
+  }
+
+  function renderAppButton() {
+    if (!isDetailPage()) return;
+    let button = document.getElementById("ewa-app-report");
+    if (!button) {
+      button = document.createElement("button");
+      button.id = "ewa-app-report";
+      button.type = "button";
+      button.addEventListener("click", openReportInApp);
+      document.body.appendChild(button);
+    }
+    button.disabled = !lastReport;
+    button.textContent = lastReport ? "Open in Fight Analyzer ↗" : "Fight Analyzer: loading ...";
   }
 
   // Mirrored bars, as used for crowd control. invert = lower is better.
@@ -5828,6 +5900,14 @@
         width: 26px; height: 26px; padding: 0; font-size: 15px; flex: none;
         background: rgba(42, 33, 24, .08) !important; color: var(--ink) !important; border-color: rgba(42, 33, 24, .3) !important;
       }
+      #ewa-app-report {
+        position: fixed; top: 12px; right: 14px; z-index: 2147483000;
+        padding: 9px 14px; border-radius: 8px; border: 1px solid #b98d34; cursor: pointer;
+        background: linear-gradient(180deg, #f0d38a, #d8b25c); color: #1b1606;
+        font: 700 13px/1 system-ui, sans-serif; box-shadow: 0 6px 18px rgba(0, 0, 0, .35);
+      }
+      #ewa-app-report:hover { filter: brightness(1.06); }
+      #ewa-app-report:disabled { opacity: .6; cursor: default; }
       #ewa-app {
         height: 26px; padding: 0 8px; display: inline-flex; align-items: center; font-size: 12px; font-weight: 700; flex: none;
         border: 1px solid rgba(42, 33, 24, .3); border-radius: 4px; text-decoration: none;
