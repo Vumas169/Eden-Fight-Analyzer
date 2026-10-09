@@ -1,7 +1,7 @@
 // Network first for the app files, cache as fallback when offline.
 // Database requests are never cached here.
-const CACHE = "efa-v9";
-const SHELL = ["./", "index.html", "app.css?v=9", "app.js?v=9", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png"];
+const CACHE = "efa-v10";
+const SHELL = ["./", "index.html", "app.css?v=10", "app.js?v=10", "manifest.webmanifest", "icons/icon.svg", "icons/icon-192.png"];
 
 self.addEventListener("install", event => {
   event.waitUntil(caches.open(CACHE).then(cache => cache.addAll(SHELL)).then(() => self.skipWaiting()));

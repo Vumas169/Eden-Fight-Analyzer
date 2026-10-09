@@ -891,7 +891,7 @@ VIEWS.over = async (ctx) => {
           ${oppListHtml(winsList.slice(0, 8), "n", "")}
         </div>
         <div class="panel">
-          <h2>Elo · 7 days ${miniSeg("efa-ov-gainkind", gainKind, [["gain", "Gain"], ["loss", "Loss"]])} ${miniSeg("efa-ov-gain", gainBucket, BRACKETS.map(([v, l]) => [v, l]))}<a class="right more" href="#/leaderboard?k=${gainKind}&b=${gainBucket}&h=168">More</a></h2>
+          <h2>Elo · 7 days ${miniSeg("efa-ov-gainkind", gainKind, [["gain", "Rising"], ["loss", "Falling"]])} ${miniSeg("efa-ov-gain", gainBucket, BRACKETS.map(([v, l]) => [v, l]))}<a class="right more" href="#/leaderboard?k=${gainKind}&b=${gainBucket}&h=168">More</a></h2>
           ${gainRows.length ? `<div class="list">${gainRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${fmt(r.rating)} · ${r.w}-${r.l}</span></span><span class="lv ${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span></div>`).join("")}</div>`
             : `<div class="empty">${gains && gains.cur && !eloCaughtUp(gains.cur) ? `The Elo is still being calculated (up to ${esc(eloUpTo(gains.cur))}).` : "No data yet."}</div>`}
         </div>
@@ -1471,9 +1471,9 @@ VIEWS.classes = async (ctx, route) => {
 // View: Leaderboard
 // ------------------------------------------------------------------
 
-const LB_KINDS = [["elo", "Elo"], ["gain", "Elo gain"], ["loss", "Elo loss"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
+const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["winrate", "Rate"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
-const LB_SUB = { elo: "rating", gain: "who climbed", loss: "who dropped", wins: "most won", winrate: "best ratio", active: "most fights", underdog: "smaller side won", streak: "longest run" };
+const LB_TITLE = { elo: "Current Elo", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LB_ICON = {
   elo: svgI("M4 15l4-4 3 3 5-6M13 8h3v3"),
@@ -1500,8 +1500,8 @@ VIEWS.lb = async (ctx, route) => {
   const head = `
     <div class="page-head"><div><h1>Leaderboard</h1></div></div>
     <div class="lb-kinds">${LB_KINDS.map(([k, label]) => `
-      <button class="lb-kind ${k === kind ? "on" : ""}" data-set="k=${k}">
-        <span class="lk-icon">${LB_ICON[k] || ""}</span><span class="lk-name">${label}</span><span class="lk-sub">${LB_SUB[k] || ""}</span>
+      <button class="lb-kind ${k === kind ? "on" : ""}" data-set="k=${k}" title="${esc(LB_TITLE[k] || "")}">
+        <span class="lk-icon">${LB_ICON[k] || ""}</span><span class="lk-name">${label}</span>
       </button>`).join("")}</div>
     <div class="filters panel">
       ${isElo ? `<div class="filter"><label>Bracket</label>${segHtml("b", bucket, BRACKETS.map(([v, l, t]) => [v, l, t]))}</div>` : ""}
@@ -1519,8 +1519,8 @@ VIEWS.lb = async (ctx, route) => {
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
     elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    loss: [["Elo loss", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    gain: [["Elo gain", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    loss: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    gain: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
     winrate: [["Win rate", r => rate(r.w, r.l)], ["W / L", wl], ["Fights", r => fmt(r.w + r.l)]],
     active: [["Fights", r => fmt(r.w + r.l)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
