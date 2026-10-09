@@ -101,7 +101,19 @@ const store = {
 // Database
 // ------------------------------------------------------------------
 
+// A query that hits the database time limit is tried once more: the first
+// try has usually loaded the data into memory, the second is fast.
 async function rpc(fn, body = {}) {
+  try {
+    return await rpcOnce(fn, body);
+  } catch (error) {
+    if (!/statement timeout|did not answer/i.test(error.message)) throw error;
+    await new Promise(r => setTimeout(r, 400));
+    return rpcOnce(fn, body);
+  }
+}
+
+async function rpcOnce(fn, body) {
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), 25 * SECOND);
   let res;
