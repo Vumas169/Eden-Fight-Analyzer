@@ -222,7 +222,8 @@ const api = {
   eloBoard: (bucket, kind, h, r, n) => cached(`eb|${bucket}|${kind}|${h}|${r}|${n}`, 2 * MINUTE,
     () => rpc("elo_board", { p_bucket: bucket, p_kind: kind, p_hours: h || null, p_realm: r || null, p_limit: n })),
   playerElo: name => cached(`pe|${norm(name)}`, 2 * MINUTE, () => rpc("player_elo", { p_name: name })),
-  fight: id => cached(`fg|${id}`, HOUR, () => rpc("fight_get", { p_id: id }))
+  fight: id => cached(`fg|${id}`, HOUR, () => rpc("fight_get", { p_id: id })),
+  fightDetail: id => rpc("fight_detail", { p_id: id })
 };
 
 // Elo brackets by the size of the player's OWN side: 1 = solo (alone, also
@@ -750,13 +751,13 @@ VIEWS.over = async (ctx) => {
   const recent = (recentRaw.rows || []).map(fightFromRow);
   watchFights(recent);
   // Latest fights by type, as in the Discord channels: 1v1, 8v8 and the rest
-  const kind = ["all", "1v1", "8v8", "other"].includes(store.get("efa-ov-kind", "all")) ? store.get("efa-ov-kind", "all") : "all";
-  const isDuel = f => f.ws === 1 && f.ls === 1;
-  const isBig = f => bigSide(f) >= 8;
+  // the winning side decides: 1v2 is solo, 6v8 is "other" (Eden lists
+  // a fight only when the smaller side or an even side won)
+  const kind = ["all", "solo", "8v8", "other"].includes(store.get("efa-ov-kind", "all")) ? store.get("efa-ov-kind", "all") : "all";
   let latest = recent;
-  if (kind === "1v1") latest = recent.filter(isDuel);
-  if (kind === "8v8") latest = ((await api.feed(48, 8, 300, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(isBig);
-  if (kind === "other") latest = ((await api.feed(24, null, 3000, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => !isDuel(f) && !isBig(f));
+  if (kind === "solo") latest = recent.filter(f => f.ws === 1);
+  if (kind === "8v8") latest = ((await api.feed(48, 8, 300, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => f.ws >= 8);
+  if (kind === "other") latest = ((await api.feed(24, null, 3000, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => f.ws >= 2 && f.ws <= 7);
   if (!ctx.alive()) return;
   updateLive(pulse.last);
   const before = state.ui.overSeen || new Set();
@@ -794,9 +795,9 @@ VIEWS.over = async (ctx) => {
       <div class="stack">
         <div class="panel">${hoursBarsHtml(hours, "Fights per hour · last 24 h")}</div>
         <div class="panel">
-          <h2>Latest fights ${miniSeg("efa-ov-kind", kind, [["all", "All"], ["1v1", "1v1"], ["8v8", "8v8"], ["other", "Other"]])}<a class="right more" href="#/fights?h=24">All fights</a></h2>
+          <h2>Latest fights ${miniSeg("efa-ov-kind", kind, [["all", "All"], ["solo", "Solo"], ["8v8", "8v8"], ["other", "Other"]])}<a class="right more" href="#/fights?h=24">All fights</a></h2>
           ${fightListHtml(latest, "over", f => fightHtml(f, null, { isNew: before.size && !before.has(f.id) }))}
-          <div class="note">${kind === "8v8" ? "A side with 8 or more, last 2 days." : kind === "other" ? "Everything except 1v1 and 8v8, last 24 hours." : kind === "1v1" ? "Last 3 hours." : "Last 3 hours."} Click a fight for both line-ups.</div>
+          <div class="note">${kind === "8v8" ? "Winning side 8 or more, last 2 days." : kind === "other" ? "Winning side 2 to 7, last 24 hours." : kind === "solo" ? "Winning side alone (1v1, 1v2 ...), last 3 hours." : "Last 3 hours."} The winning side decides. Click a fight for both line-ups.</div>
         </div>
       </div>
       <div class="stack">
@@ -1641,7 +1642,7 @@ function rosterHtml(side) {
             <div class="rp-top">
               ${id ? classIcon(id) : roleIcon(p.role)}
               ${nameHtml(p.name)}${p.name === side.leader ? '<span class="lead-mark" title="Group leader">★</span>' : ""}
-              <span class="sub">${esc(p.cls || "unknown")}</span>
+              <span class="sub">${esc(p.cls || "unknown")}${p.guild ? ` · &lt;${esc(p.guild)}&gt;` : ""}</span>
               ${st.dd && st.dd === topDmg && players.length > 1 ? '<span class="mvp" title="Most damage of the side">top dmg</span>' : ""}
               ${st.hd && st.hd === topHeal && players.length > 1 && st.hd >= 1000 ? '<span class="mvp heal" title="Most healing of the side">top heal</span>' : ""}
               <span class="rr" title="${fmt(p.points)} realm rank steps">${esc(p.rank || "")}</span>
@@ -1659,17 +1660,88 @@ function rosterHtml(side) {
     </div>`;
 }
 
+// The same report the userscript builds, made from Eden's fight data
+const CORE = { 1: ["Cleric", "Friar", "Minstrel"], 2: ["Healer", "Healer", "Shaman"], 3: ["Bard", "Druid", "Warden"] };
+const CC_KEYS = [["tm", "Mezzed"], ["ts", "Stunned"], ["tr", "Rooted"], ["ta", "Peeled"], ["td", "Diseased"], ["tn", "Nearsighted"], ["ti", "Interrupted"], ["br", "Sheared"]];
+const rankIndex = (rp, table) => { let i = 0; for (let k = 0; k < table.length; k += 1) { if (table[k] <= rp) i = k; else break; } return i; };
+const rankLabel = i => `${Math.floor(i / 10) + 1}L${i % 10}`;
+
+function reportFromEden(raw, rp) {
+  const guilds = raw.gu || {};
+  const side = (sd, won) => {
+    const players = (sd.p || []).map(p => {
+      const st = { ...(p.s || {}) };
+      st.rn = (st.ri || []).length;
+      delete st.ri; delete st.di;
+      const idx = rankIndex(p.rp || 0, rp || []);
+      const cls = CLASS_NAMES[p.c] || null;
+      return { name: p.n, cls, clsId: p.c, rank: rankLabel(idx), points: idx, role: cls ? (ROLE_OF[cls] || "Tank") : "Unknown",
+               guild: p.g && guilds[p.g] ? guilds[p.g].n : "", stats: st };
+    });
+    const known = players.filter(p => p.cls).map(p => p.cls);
+    const variable = [...known];
+    const core = [];
+    if (players.length >= 6) for (const c of CORE[sd.r] || []) { const i = variable.indexOf(c); if (i >= 0) { variable.splice(i, 1); core.push(c); } }
+    const counts = new Map();
+    variable.forEach(c => counts.set(c, (counts.get(c) || 0) + 1));
+    const roles = ROLE_ORDER.map(r => [r, variable.filter(c => (ROLE_OF[c] || "Tank") === r).length]).filter(([, n]) => n).sort((x, y) => y[1] - x[1]);
+    const order = roles.map(r => r[0]);
+    const groups = [...counts.entries()].map(([c, n]) => ({ cls: c, count: n, role: ROLE_OF[c] || "Tank" }))
+      .sort((x, y) => order.indexOf(x.role) - order.indexOf(y.role) || y.count - x.count || x.cls.localeCompare(y.cls));
+    return { won, size: sd.s || players.length, leader: sd.l || "", players,
+             comp: { realm: REALMS[sd.r] || null, roles, groups, core, unknown: players.length - known.length } };
+  };
+  const win = side(raw.a || {}, true);
+  const loss = side(raw.b || {}, false);
+  const sum = (ps, k) => ps.reduce((t, p) => t + (p.stats[k] || 0), 0);
+  const tot = ps => ({ dd: sum(ps, "dd"), dt: sum(ps, "dt"), hd: sum(ps, "hd"), d: sum(ps, "d"), rn: sum(ps, "rn") });
+  const pts = ps => ps.reduce((t, p) => t + p.points, 0);
+  const avgLabel = ps => (ps.length ? rankLabel(Math.round(pts(ps) / ps.length)) : "-");
+  return {
+    v: 1, id: raw.id, t: raw.s, d: raw.d, matchup: `${(raw.a || {}).s || win.players.length}v${(raw.b || {}).s || loss.players.length}`,
+    win, loss,
+    cc: CC_KEYS.map(([k, label]) => [label, sum(win.players, k), sum(loss.players, k)]),
+    totals: { 1: tot(win.players), 2: tot(loss.players) },
+    ra: [pts(win.players), pts(loss.players), avgLabel(win.players), avgLabel(loss.players)]
+  };
+}
+
+// Ask the database for Eden's fight data; the first time it fetches it
+// from Eden, which takes a second or two.
+async function loadEdenReport(id, alive) {
+  for (let i = 0; i < 14; i += 1) {
+    const res = await api.fightDetail(id);
+    if (!alive()) return null;
+    if (res && res.status === "ok") {
+      const report = reportFromEden(res.data, res.rp);
+      saveReport(report);
+      return report;
+    }
+    if (!res || res.status === "error" || res.status === "busy") return { failed: res ? (res.error || res.status) : "no answer" };
+    await new Promise(r => setTimeout(r, i < 4 ? 700 : 1500));
+  }
+  return { failed: "Eden did not answer in time" };
+}
+
 VIEWS.report = async (ctx, route) => {
   const id = String(route.arg || "").toLowerCase();
   if (!/^[0-9a-z]{1,10}$/.test(id)) { ctx.view.innerHTML = `<div class="panel"><div class="empty">No fight id.</div></div>`; return; }
-  const report = loadReport(id);
+  let report = loadReport(id);
   if (!report && window.opener && !state.ui.askedOpener) {
     state.ui.askedOpener = true;
     try { window.opener.postMessage({ type: "efa-ready", id }, "*"); } catch (e) { /* no opener */ }
   }
-  if (!ctx.silent) ctx.view.innerHTML = loadingHtml();
+  if (ctx.silent && report) return; // a finished report does not change
+  if (!ctx.silent) ctx.view.innerHTML = `<div class="panel"><div class="empty"><span class="spin"></span> Loading the fight ...</div></div>`;
   const row = await api.fight(id).catch(() => null);
   if (!ctx.alive()) return;
+  let failed = "";
+  if (!report) {
+    const got = await loadEdenReport(id, ctx.alive);
+    if (!ctx.alive()) return;
+    if (got && !got.failed) report = got;
+    else failed = got ? got.failed : "";
+  }
   const f = row ? fightFromRow(row) : null;
   if (f) await loadChars([...f.winners, ...f.losers]);
   if (!ctx.alive()) return;
@@ -1698,7 +1770,7 @@ VIEWS.report = async (ctx, route) => {
         ${names.map(n => { const i = chars.get(n); return `<div class="rp"><div class="rp-top">${i && i.c ? classIcon(i.c) : roleIcon("Unknown")}${nameHtml(n)}<span class="sub">${i && i.c ? esc(className(i.c)) : ""}</span></div></div>`; }).join("")}
       </div>`;
     ctx.view.innerHTML = `${head}
-      <div class="explain"><p>Damage, healing, crowd control and realm ranks come from Eden's fight page. Open this fight on Eden with the userscript installed and click "Open in Fight Analyzer" at the top right. The full report then shows up here.</p></div>
+      <div class="warn" style="margin-bottom:16px"><span>The full report could not be loaded from Eden right now${failed ? ` (${esc(failed)})` : ""}. Shown below: the line-ups from the database.</span><button class="btn" data-act="retry">Try again</button></div>
       ${f ? `<div class="grid g2">${side(f.winners, f.wr, true)}${side(f.losers, f.lr, false)}</div>` : `<div class="panel"><div class="empty">This fight is not in the database.</div></div>`}`;
     return;
   }
@@ -1727,7 +1799,7 @@ VIEWS.report = async (ctx, route) => {
         { label: "Deaths", left: t[1].d || 0, right: t[2].d || 0, invert: true, leftNote: rez(1), rightNote: rez(2) },
         { label: "Realm ranks", left: ra[0] || 0, right: ra[1] || 0, sub: `Ø ${ra[2]} vs ${ra[3]}`, hint: "Sum of realm rank steps" }
       ])}</div>
-      <div class="panel"><h2>Crowd control and support</h2>${duelHtml((report.cc || []).map(([label, l, r]) => ({ label, left: l, right: r })))}</div>
+      <div class="panel"><h2>Crowd control and support</h2>${(() => { const rows = (report.cc || []).filter(([, l, r]) => l || r); return rows.length ? duelHtml(rows.map(([label, l, r]) => ({ label, left: l, right: r }))) : `<div class="empty">No crowd control in this fight.</div>`; })()}</div>
     </div>
     <div class="grid g2" style="margin-top:16px">
       <div class="panel">${rosterHtml(report.win)}</div>

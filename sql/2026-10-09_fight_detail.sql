@@ -1,0 +1,5 @@
+-- Fight-Report ohne Userscript: die Datenbank holt Eden's Fight-Daten bei
+-- Bedarf einmal ab (ueber pg_net, also vom Datenbank-Server) und speichert
+-- sie. Hoechstens 120 neue Fights pro Stunde, damit Eden nicht belastet wird.
+-- Die Rang-Tabelle aus Eden's daoc.json liegt in meta 'eden_rp'.
+-- (Eingespielt am 09.10.2026 direkt in der Datenbank; Funktion fight_detail.)
