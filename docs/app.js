@@ -1531,7 +1531,15 @@ VIEWS.lb = async (ctx, route) => {
   }[kind];
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
-    elo: `Rating system Glicko-2. Score = rating minus twice the uncertainty (±): who stays on top has proven himself against many established opponents. Fights against players with little experience count only partly: in Solo almost nothing below 20 fights, about 70% at 50 and in full from 100; in Small and Group in full from 20. Repeated solo fights against the same opponent within 24 hours count less each time. Ø opponent: average rating of all opponents. vs established: share of wins against experienced players (Solo 100 fights, Small and Group 20). Each side counts in the bracket of its own size: Solo, Small (2 to 5), Group (6 and more). Listed from 20 fights, active in the chosen period.`,
+    elo: `<div class="notes">
+      <div><b>Score</b><span>Rating minus twice the uncertainty (±). High only for players who have proven themselves against many opponents.</span></div>
+      <div><b>Weighting</b><span>Fights against inexperienced players count only partly. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20.</span></div>
+      <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
+      <div><b>Ø opponent</b><span>Average rating of all opponents.</span></div>
+      <div><b>vs established</b><span>Share of wins against experienced players (Solo from 100 fights, Small and Group from 20).</span></div>
+      <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
+      <div><b>Listed</b><span>From 20 fights, active in the chosen period. Rating system: Glicko-2.</span></div>
+    </div>`,
     loss: "Elo lost in the period (from the first fight in the period to the last), at least 3 fights. Who had a bad run.",
     gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,

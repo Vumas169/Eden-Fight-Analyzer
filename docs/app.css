@@ -511,3 +511,8 @@ img.ci { object-fit: cover; background: #1d1a12; }
 @media (max-width: 520px) { .brackets { grid-template-columns: 1fr; } .lb-kinds { grid-template-columns: repeat(2, minmax(0, 1fr)); } }
 
 .tile strong .rd { font: 500 13px var(--font); color: var(--faint); margin-left: 6px; }
+
+.notes { display: grid; gap: 6px; }
+.notes > div { display: grid; grid-template-columns: 120px 1fr; gap: 12px; }
+.notes b { color: var(--muted); font-weight: 600; }
+@media (max-width: 520px) { .notes > div { grid-template-columns: 1fr; gap: 0; } }
