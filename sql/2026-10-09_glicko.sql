@@ -116,3 +116,12 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 
 -- 09.10. 11:35: Solo-Gewichtung steiler: min(1, (n^4 / (n^4 + 41.5^4)) / 0.9712)
 --   7: 0,1 %, 10: 0,3 %, 20: 5 %, 30: 22 %, 40: 48 %, 50: 70 %, 65: 88 %, 80: 96 %, 100: 100 %
+
+-- 09.10. 12:40 Korrektur: Beide Seiten eines Fights bekommen dasselbe Gewicht,
+-- berechnet aus der Erfahrung der unerfahreneren Seite (least(o.g_t, s.g_t)).
+-- Vorher verloren Neulinge voll, Sieger gewannen fast nichts, und die ganze
+-- Skala sank (Solo-Durchschnitt 1124 statt ~1500). Probelauf mit Korrektur:
+-- Durchschnitt 1499 / 1489 / 1485.
+-- Unsicherheit waechst langsamer zurueck (50 -> 350 in etwa einem Jahr, 329/Tag).
+-- Rangliste sortiert nach rating, nur verlaessliche Werte (rd <= 150);
+-- player_elo-Rang ebenso.

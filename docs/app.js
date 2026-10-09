@@ -1172,8 +1172,9 @@ VIEWS.player = async (ctx, route) => {
         if (!e) return tile(`Elo ${label}`, "-", `no ${label.toLowerCase()} fights`);
         const [, rating, rank, peak, games, w, l, gain, rd, opp, est] = e;
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
-        const extra = opp ? `Ø opponent ${fmt(opp)}${w ? `, ${fmt1(pct(est || 0, w))}% of wins vs established players` : ""}` : "";
-        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}. ${esc(extra)}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${rank ? `rank ${fmt(rank)}` : `${fmt(games)} of 20 fights`}${g}</em>${opp ? `<em>Ø opp ${fmt(opp)}${w ? ` · ${fmt1(pct(est || 0, w))}% vs est.` : ""}</em>` : ""}</div>`;
+        const provisional = rd != null && rd > 150;
+        const status = rank ? `rank ${fmt(rank)}` : games < 20 ? `${fmt(games)} of 20 fights` : "provisional";
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs established</em>` : ""}</div>`;
       }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
@@ -1474,7 +1475,7 @@ VIEWS.classes = async (ctx, route) => {
 
 const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["winrate", "Rate"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
-const LB_TITLE = { elo: "Rating with uncertainty, best proven first", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
+const LB_TITLE = { elo: "Current Elo, reliable ratings only", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LB_ICON = {
   elo: svgI("M4 15l4-4 3 3 5-6M13 8h3v3"),
@@ -1519,8 +1520,8 @@ VIEWS.lb = async (ctx, route) => {
   const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
-    elo: [["Score", r => fmt(r.score != null ? r.score : r.rating)], ["Rating", r => `${fmt(r.rating)}${r.rd != null ? ` <span class="sub">±${fmt(r.rd)}</span>` : ""}`],
-          ["Ø opponent", r => (r.opp ? fmt(r.opp) : "-")], ["vs established", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-")], ["W / L", wl]],
+    elo: [["Elo", r => `${fmt(r.rating)}${r.rd != null ? ` <span class="sub">±${fmt(r.rd)}</span>` : ""}`], ["Peak", r => fmt(r.peak)],
+          ["vs established", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-")], ["W / L", wl]],
     loss: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     gain: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
@@ -1532,13 +1533,12 @@ VIEWS.lb = async (ctx, route) => {
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
     elo: `<div class="notes">
-      <div><b>Score</b><span>Rating minus twice the uncertainty (±). High only for players who have proven themselves against many opponents.</span></div>
-      <div><b>Weighting</b><span>Fights against inexperienced players count only partly. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20.</span></div>
+      <div><b>Elo</b><span>Rating system Glicko-2. The ± shows how certain the value is; it shrinks with every meaningful fight and grows again during long breaks.</span></div>
+      <div><b>Listed</b><span>Only reliable ratings (± 150 or less), from 20 fights, active in the chosen period.</span></div>
+      <div><b>Weighting</b><span>A fight counts by the experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20.</span></div>
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
-      <div><b>Ø opponent</b><span>Average rating of all opponents.</span></div>
       <div><b>vs established</b><span>Share of wins against experienced players (Solo from 100 fights, Small and Group from 20).</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
-      <div><b>Listed</b><span>From 20 fights, active in the chosen period. Rating system: Glicko-2.</span></div>
     </div>`,
     loss: "Elo lost in the period (from the first fight in the period to the last), at least 3 fights. Who had a bad run.",
     gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
