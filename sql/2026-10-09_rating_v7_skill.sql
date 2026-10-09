@@ -71,7 +71,7 @@ begin
              1 / sqrt(1 / (q2.phi * q2.phi + 0.0036) + q2.gg * q2.gg * q2.ee * (1 - q2.ee)) phi_new,
              1 / sqrt(1 / (q2.sphi * q2.sphi + 0.0036) + q2.sgg * q2.sgg * q2.see * (1 - q2.see)) sphi_new,
              -- skill: a win counts in full up to 60 % win chance, nothing from 90 %
-             case when q2.win then least(1, greatest(0, (0.9 - q2.see) / 0.3)) else 1 end sf
+             least(1, greatest(0, (0.9 - (case when q2.win then q2.see else 1 - q2.see end)) / 0.3)) sf
       from q2
     ), q4 as (
       select q3.*,
@@ -122,3 +122,8 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 
 -- elo_board kennt p_kind 'skill' (sortiert nach s_rating, gelistet ab s_rd <= 200, Feld 'elo' = normale Elo);
 -- player_elo liefert zusaetzlich [11] s_rating, [12] s_rd, [13] Skill-Rang.
+
+-- Version 8 (09.10. 18:10): Skill-Faktor gilt fuer beide Seiten eines Fights (Gewinner und
+--   Verlierer), abhaengig von der Siegchance des Gewinners. Version 7 kuerzte nur den Gewinn,
+--   dadurch sank die ganze Skala (Schnitt Solo 1433) und Vumas lag trotz 90 % bei 1435.
+--   Jetzt: Farmen bringt nichts und kostet das Opfer nichts, Ueberraschungssiege zaehlen voll.

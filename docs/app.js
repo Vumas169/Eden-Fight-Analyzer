@@ -1553,7 +1553,7 @@ VIEWS.lb = async (ctx, route) => {
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
     </div>`,
     skill: `<div class="notes">
-      <div><b>Skill</b><span>Same rules as the Elo, with one difference: a win against a clearly weaker opponent brings less, and nothing once the win chance is 90% or more (about 380 points apart). Losses count in full. Farming much weaker players does not raise it.</span></div>
+      <div><b>Skill</b><span>Same rules as the Elo, with one difference: when the favourite wins, the fight counts less, and not at all once the win chance was 90% or more (about 380 points apart). Upsets count in full. Farming much weaker players does not raise it.</span></div>
       <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
     </div>`,
     loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
