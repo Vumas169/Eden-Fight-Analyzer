@@ -1174,7 +1174,7 @@ VIEWS.player = async (ctx, route) => {
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
         const provisional = rd != null && rd > 200;
         const status = rank ? `rank ${fmt(rank)}` : games < 20 ? `${fmt(games)} of 20 fights` : "provisional";
-        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs veterans</em>` : ""}</div>`;
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs high Elo</em>` : ""}</div>`;
       }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
@@ -1524,7 +1524,7 @@ VIEWS.lb = async (ctx, route) => {
   // [label, cell, sort value]
   const cols = {
     elo: [["Elo", r => fmt(r.rating), r => r.rating], ["Peak", r => fmt(r.peak), r => r.peak], ["Win rate", r => rate(r.w, r.l), rateV],
-          ["vs veterans", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-"), r => (r.w ? (r.est || 0) / r.w : -1)], ["W / L", wl, r => r.w + r.l]],
+          ["vs high Elo", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-"), r => (r.w ? (r.est || 0) / r.w : -1)], ["W / L", wl, r => r.w + r.l]],
     loss: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
     gain: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
     wins: [["Wins", r => fmt(r.w), r => r.w], ["Fights", r => fmt(r.w + r.l), r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
@@ -1542,11 +1542,11 @@ VIEWS.lb = async (ctx, route) => {
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
     elo: `<div class="notes">
-      <div><b>Elo</b><span>Rating system Glicko-2. Each value also has an uncertainty (shown on the player page); it shrinks with every meaningful fight and grows again during long breaks.</span></div>
+      <div><b>Elo</b><span>Rating system Glicko-2. Each value also has an uncertainty (shown on the player page); it shrinks with every meaningful fight and grows slowly during breaks (back to the starting value after about three years).</span></div>
       <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
       <div><b>Weighting</b><span>A fight counts by the season experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20, and each person's share gets smaller the larger the own side.</span></div>
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
-      <div><b>vs veterans</b><span>Share of wins against players with many fights this season: Solo from 150, Small from 50, Group from 75. That is roughly the more active half of all opponents.</span></div>
+      <div><b>vs high Elo</b><span>Share of wins against strong opponents, measured by their Elo at the time of the fight: Solo from 1600, Small from 1650, Group from 1700 (team average). That is roughly the top quarter of all opponents.</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
     </div>`,
     loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",

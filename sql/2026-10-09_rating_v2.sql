@@ -131,3 +131,8 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 --   "vs veterans" ab Solo 150, Small 50, Gruppe 75 Fights (etwa die aktivere Haelfte der Gegner).
 --   Rising/Falling: Unsicherheit bis 200 und mindestens 20 Fights (ohne "20 vor dem Zeitraum").
 create table if not exists public.elo_exp (bucket smallint not null, name text not null, n int not null, primary key (bucket, name));
+
+-- Version 6 (09.10. 16:30): Unsicherheit waechst bei Pausen mit 110 je Tag (vorher 329),
+--   also von 50 auf 350 in etwa drei Jahren. "vs high Elo": Sieg gegen Gegnerseite mit
+--   Elo (Schnitt) ab Solo 1600, Small 1650, Gruppe 1700 vor dem Fight (oberes Viertel der
+--   Gegner, gemessen an den Fights der letzten 60 Tage).
