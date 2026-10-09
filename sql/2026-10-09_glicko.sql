@@ -113,3 +113,6 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 --   0.05 + 0.95 * smoothstep(min(1, fights / 100))  -> 20: 15 %, 50: 53 %, 80: 90 %
 -- Small und Group bleiben linear 10 % bis 100 % bei 20 Fights.
 -- "vs established": Solo ab 100 Fights, Small und Group ab 20.
+
+-- 09.10. 11:35: Solo-Gewichtung steiler: min(1, (n^4 / (n^4 + 41.5^4)) / 0.9712)
+--   7: 0,1 %, 10: 0,3 %, 20: 5 %, 30: 22 %, 40: 48 %, 50: 70 %, 65: 88 %, 80: 96 %, 100: 100 %
