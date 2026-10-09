@@ -367,7 +367,7 @@ const ICON_URL = name => `https://eden.solo-daoc.net/icons/${encodeURIComponent(
 const classIcon = id => {
   const name = CLASS_NAMES[id];
   if (!name) return `<span class="ci role-unknown" title="Unknown class">${ICON.Unknown}</span>`;
-  return `<img class="ci" src="${ICON_URL(name)}" alt="" title="${esc(name)}" loading="lazy" decoding="async">`;
+  return `<img class="ci" src="${ICON_URL(name)}" alt="" title="${esc(name)}" decoding="async">`;
 };
 const roleIcon = role => `<span class="ci role-${String(role || "Unknown").toLowerCase()}" title="${esc(role || "Unknown")}">${ICON[role] || ICON.Unknown}</span>`;
 const realmDot = r => (REALMS[r] ? `<span class="rm r${r}" title="${REALMS[r]}"></span>` : "");
