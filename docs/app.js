@@ -1549,7 +1549,7 @@ VIEWS.lb = async (ctx, route) => {
       <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
       <div><b>Weighting</b><span>A fight counts by the season experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20, and each person's share gets smaller the larger the own side.</span></div>
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
-      <div><b>vs high Elo</b><span>Share of wins against strong opponents, measured by their Elo at the time of the fight: Solo from 1600, Small from 1650, Group from 1700 (team average). That is roughly the top quarter of all opponents.</span></div>
+      <div><b>vs high Elo</b><span>Share of wins against opponents who are strong by their current Elo: Solo from 1575, Small from 1625, Group from 1650 (team average). That is roughly the top quarter of all opponents. Updated every hour.</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
     </div>`,
     skill: `<div class="notes">

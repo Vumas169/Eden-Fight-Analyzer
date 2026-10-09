@@ -127,3 +127,11 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 --   Verlierer), abhaengig von der Siegchance des Gewinners. Version 7 kuerzte nur den Gewinn,
 --   dadurch sank die ganze Skala (Schnitt Solo 1433) und Vumas lag trotz 90 % bei 1435.
 --   Jetzt: Farmen bringt nichts und kostet das Opfer nichts, Ueberraschungssiege zaehlen voll.
+
+-- 09.10. 19:50: "vs high Elo" wird nicht mehr zum Zeitpunkt des Fights gezaehlt (fruehe Saison lag
+--   fast alles bei 1500, Median der Gelisteten nur 1 bis 5 %), sondern stuendlich nach der
+--   aktuellen Elo der Gegner: Tabelle elo_hi(bucket, name, hw), Funktion _hi_refresh() (~30 s),
+--   cron 'ewa-hi-refresh' Minute 23. Grenzen = oberes Viertel der Gegner der letzten 60 Tage
+--   nach aktueller Elo: Solo 1575, Small 1625, Gruppe 1650 (Teamschnitt).
+--   elo_board und player_elo lesen 'est' aus elo_hi.
+create table if not exists public.elo_hi (bucket smallint not null, name text not null, hw int not null, primary key (bucket, name));
