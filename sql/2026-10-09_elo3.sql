@@ -60,7 +60,7 @@ begin
       from p, t where t.ra is not null and t.rb is not null
     ), dd as (
       insert into elo_day as d (bucket, name, day, r_start, r_end, n, w)
-      select b, q.name, v_day, q.r, q.r_new, 1, case when q.win then 1 else 0 end from q
+      select b, q.name, v_day, q.r, q.r_new, 1, case when q.win then 1 else 0 end from q where f.ts >= now() - interval '35 days'
       on conflict (bucket, day, name) do update
         set r_end = excluded.r_end, n = d.n + 1, w = d.w + excluded.w
       returning 1
@@ -143,4 +143,12 @@ $$;
 revoke all on function public.player_elo(text) from public;
 grant execute on function public.player_elo(text) to anon, authenticated;
 
-select cron.schedule('ewa-elo', '* * * * *', 'select public._elo_step(20000)');
+select cron.schedule('ewa-elo', '30 seconds', 'select public._elo_step(20000)');
+
+-- Vom Nutzer im SQL Editor auszufuehren (enthaelt Loeschbefehle):
+-- Block 1: Tagesverlauf leeren (bisher nur alte Tage) und taeglich auf 35 Tage kuerzen
+-- truncate public.elo_day;
+-- create or replace function public._elo_day_trim() returns void language sql security definer set search_path = public as
+--   $f$ delete from elo_day where day < current_date - 35 $f$;
+-- revoke all on function public._elo_day_trim() from public, anon, authenticated;
+-- select cron.schedule('ewa-elo-day-trim', '41 3 * * *', 'select public._elo_day_trim()');
