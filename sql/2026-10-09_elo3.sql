@@ -160,3 +160,5 @@ select cron.schedule('ewa-elo', '30 seconds', 'select public._elo_step(20000)');
 -- truncate public.elo, public.elo_day;
 -- delete from public.meta where key in ('elo_cur', 'elo_built');
 -- select cron.alter_job((select jobid from cron.job where jobname = 'ewa-elo'), active := true);
+
+-- 09.10.: elo_board kennt zusaetzlich p_kind 'loss' (Elo-Verlust, aufsteigend sortiert).

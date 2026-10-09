@@ -470,3 +470,5 @@ img.ci { object-fit: cover; background: #1d1a12; }
 .icon-btn.spinning svg { animation: rot .8s linear infinite; }
 
 .gold { color: var(--gold2); }
+.mvp.cc { background: #b9a4f0; }
+.mvp.tank { background: #9fb4c8; }

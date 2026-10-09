@@ -738,11 +738,12 @@ VIEWS.over = async (ctx) => {
   if (!ctx.silent && !peek("pulse")) ctx.view.innerHTML = loadingHtml();
   const winsSpan = store.get("efa-ov-wins", "1h");
   const gainBucket = store.get("efa-ov-gain", 1);
+  const gainKind = store.get("efa-ov-gainkind", "gain") === "loss" ? "loss" : "gain";
   const [pulse, recentRaw, wins7, gains, streaks7] = await Promise.all([
     api.pulse(ctx.silent),
     api.feed(3, null, 400, ctx.silent),
     winsSpan === "7d" ? api.leaderboard("wins", 168, null, null, 8).catch(() => null) : null,
-    api.eloBoard(gainBucket, "gain", 168, 0, 8).catch(() => null),
+    api.eloBoard(gainBucket, gainKind, 168, 0, 8).catch(() => null),
     api.leaderboard("streak", 168, null, null, 8).catch(() => null)
   ]);
   const heat = await api.heat().catch(() => null);
@@ -806,8 +807,8 @@ VIEWS.over = async (ctx) => {
           ${oppListHtml(winsList.slice(0, 8), "n", "")}
         </div>
         <div class="panel">
-          <h2>Elo gain · 7 days ${miniSeg("efa-ov-gain", gainBucket, BRACKETS.map(([v, l]) => [v, l]))}<a class="right more" href="#/leaderboard?k=gain&b=${gainBucket}&h=168">More</a></h2>
-          ${gainRows.length ? `<div class="list">${gainRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${fmt(r.rating)} · ${r.w}-${r.l}</span></span><span class="lv w">+${fmt(r.gain)}</span></div>`).join("")}</div>`
+          <h2>Elo · 7 days ${miniSeg("efa-ov-gainkind", gainKind, [["gain", "Gain"], ["loss", "Loss"]])} ${miniSeg("efa-ov-gain", gainBucket, BRACKETS.map(([v, l]) => [v, l]))}<a class="right more" href="#/leaderboard?k=${gainKind}&b=${gainBucket}&h=168">More</a></h2>
+          ${gainRows.length ? `<div class="list">${gainRows.map((r, i) => `<div class="li"><span class="rank">${i + 1}</span><span class="lm">${realmDot(r.r)}${nameHtml(r.n)} <span class="sub">${fmt(r.rating)} · ${r.w}-${r.l}</span></span><span class="lv ${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span></div>`).join("")}</div>`
             : `<div class="empty">${gains && gains.cur && !eloCaughtUp(gains.cur) ? `The Elo is still being calculated (up to ${esc(eloUpTo(gains.cur))}).` : "No data yet."}</div>`}
         </div>
         <div class="panel">
@@ -1375,16 +1376,16 @@ VIEWS.classes = async (ctx, route) => {
 // View: Leaderboard
 // ------------------------------------------------------------------
 
-const LB_KINDS = [["elo", "Elo"], ["gain", "Elo gain"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
+const LB_KINDS = [["elo", "Elo"], ["gain", "Elo gain"], ["loss", "Elo loss"], ["wins", "Most wins"], ["winrate", "Win rate"], ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
 
 VIEWS.lb = async (ctx, route) => {
   const p = route.params;
   let kind = p.get("k") === "rating" ? "elo" : p.get("k");
   if (!LB_KINDS.some(([k]) => k === kind)) kind = "elo";
-  const isElo = kind === "elo" || kind === "gain";
+  const isElo = kind === "elo" || kind === "gain" || kind === "loss";
   const bucket = [1, 2, 3].includes(Number(p.get("b"))) ? Number(p.get("b")) : 1;
-  const periods = kind === "gain" ? LB_PERIODS.filter(([h]) => h && h <= 720) : LB_PERIODS;
+  const periods = kind === "gain" || kind === "loss" ? LB_PERIODS.filter(([h]) => h && h <= 720) : LB_PERIODS;
   let hours = periods.some(([h]) => String(h) === p.get("h")) ? Number(p.get("h")) : 168;
   const size = sizeParam(p);
   const realm = [1, 2, 3].includes(Number(p.get("r"))) ? Number(p.get("r")) : 0;
@@ -1400,7 +1401,7 @@ VIEWS.lb = async (ctx, route) => {
     </div>`;
   if (!ctx.silent) ctx.view.innerHTML = head + loadingHtml();
   const data = isElo
-    ? await api.eloBoard(bucket, kind === "elo" ? "rating" : "gain", hours, realm, limit)
+    ? await api.eloBoard(bucket, kind === "elo" ? "rating" : kind, hours, realm, limit)
     : await api.leaderboard(kind, hours, size, realm, limit);
   if (!ctx.alive()) return;
   const rows = (data && data.rows) || [];
@@ -1408,6 +1409,7 @@ VIEWS.lb = async (ctx, route) => {
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
     elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
+    loss: [["Elo loss", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     gain: [["Elo gain", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
     winrate: [["Win rate", r => rate(r.w, r.l)], ["W / L", wl], ["Fights", r => fmt(r.w + r.l)]],
@@ -1418,6 +1420,7 @@ VIEWS.lb = async (ctx, route) => {
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
     elo: `Each side counts in the bracket of its own size: Solo = alone (a 1v3 too), Small = own side 2 to 5, Group = own side 6 and more. A duo beating six plays in Small, the six in Group. Team average against team average, start 1500, K 32 for the first 30 fights of a bracket, then 16. Listed from 20 fights, active in the chosen period.`,
+    loss: "Elo lost in the period (from the first fight in the period to the last), at least 3 fights. Who had a bad run.",
     gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
@@ -1622,8 +1625,13 @@ function rosterHtml(side) {
   const team = k => players.reduce((sum, p) => sum + ((p.stats || {})[k] || 0), 0);
   const tDmg = team("dd");
   const tHeal = team("hd");
-  const topDmg = Math.max(...players.map(p => (p.stats || {}).dd || 0), 0);
-  const topHeal = Math.max(...players.map(p => (p.stats || {}).hd || 0), 0);
+  // badges: the player with the most healing, crowd control (mez, stun,
+  // root) and damage taken on this side; damage is the sort order anyway
+  const ccOf = st => (st.tm || 0) + (st.ts || 0) + (st.tr || 0);
+  const topOf = f => { const m = Math.max(...players.map(p => f(p.stats || {})), 0); return m > 0 && players.length > 1 ? m : null; };
+  const topHeal = topOf(st => (st.hd >= 1000 ? st.hd : 0));
+  const topCc = topOf(ccOf);
+  const topTank = topOf(st => (st.dt >= 1000 ? st.dt : 0));
   const big = n => (n >= 1000 ? short(n) : null);
   const sorted = [...players].sort((a, b) => ((b.stats || {}).dd || 0) - ((a.stats || {}).dd || 0) || b.points - a.points);
   const realm = REALM_ID[(side.comp || {}).realm];
@@ -1643,8 +1651,9 @@ function rosterHtml(side) {
               ${id ? classIcon(id) : roleIcon(p.role)}
               ${nameHtml(p.name)}${p.name === side.leader ? '<span class="lead-mark" title="Group leader">★</span>' : ""}
               <span class="sub">${esc(p.cls || "unknown")}${p.guild ? ` · &lt;${esc(p.guild)}&gt;` : ""}</span>
-              ${st.dd && st.dd === topDmg && players.length > 1 ? '<span class="mvp" title="Most damage of the side">top dmg</span>' : ""}
-              ${st.hd && st.hd === topHeal && players.length > 1 && st.hd >= 1000 ? '<span class="mvp heal" title="Most healing of the side">top heal</span>' : ""}
+              ${topHeal && st.hd === topHeal ? '<span class="mvp heal" title="Most healing of the side">top heal</span>' : ""}
+              ${topCc && ccOf(st) === topCc ? `<span class="mvp cc" title="Most mez, stun and root of the side: ${topCc}">top cc</span>` : ""}
+              ${topTank && st.dt === topTank ? '<span class="mvp tank" title="Most damage taken of the side">top tank</span>' : ""}
               <span class="rr" title="${fmt(p.points)} realm rank steps">${esc(p.rank || "")}</span>
             </div>
             <div class="rp-nums">
