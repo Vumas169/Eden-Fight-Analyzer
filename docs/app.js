@@ -1174,7 +1174,7 @@ VIEWS.player = async (ctx, route) => {
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
         const provisional = rd != null && rd > 200;
         const status = rank ? `rank ${fmt(rank)}` : games < 20 ? `${fmt(games)} of 20 fights` : "provisional";
-        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs established</em>` : ""}</div>`;
+        return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs veterans</em>` : ""}</div>`;
       }).join("")}
       ${tile("Last 7 days", card ? `<span class="w">${fmt(card.wins7)}</span> / <span class="l">${fmt(card.losses7)}</span>` : "-", card && card.wins7 + card.losses7 ? `${fmt1(pct(card.wins7, card.wins7 + card.losses7))}% won` : "no fights")}
       ${tile("All time", card ? `<span class="w">${fmt(card.wins)}</span> / <span class="l">${fmt(card.losses)}</span>` : "-", card && card.wins + card.losses ? `${fmt1(pct(card.wins, card.wins + card.losses))}% won` : "")}
@@ -1262,7 +1262,7 @@ VIEWS.player = async (ctx, route) => {
 // ------------------------------------------------------------------
 
 const CLASS_WINDOWS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [2160, "3 months"], [0, "Season"]];
-const sorts = { cls: { key: "rate", dir: -1 }, vs: { key: "rate", dir: -1 }, pl: { key: "total", dir: -1 }, q: { key: "mid80", dir: -1 } };
+const sorts = { cls: { key: "rate", dir: -1 }, vs: { key: "rate", dir: -1 }, pl: { key: "total", dir: -1 }, q: { key: "mid80", dir: -1 }, lb: { key: "rank", dir: 1, kind: "" } };
 
 function sortList(rows, table, minFights) {
   const { key, dir } = sorts[table];
@@ -1473,7 +1473,7 @@ VIEWS.classes = async (ctx, route) => {
 // View: Leaderboard
 // ------------------------------------------------------------------
 
-const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["winrate", "Rate"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
+const LB_KINDS = [["elo", "Elo"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
 const LB_TITLE = { elo: "Current Elo, reliable ratings only", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
@@ -1518,31 +1518,39 @@ VIEWS.lb = async (ctx, route) => {
   if (!ctx.alive()) return;
   const rows = (data && data.rows) || [];
   const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
+  const rateV = r => (r.w + r.l ? r.w / (r.w + r.l) : -1);
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
+  const chg = r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`;
+  // [label, cell, sort value]
   const cols = {
-    elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)],
-          ["vs established", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-")], ["W / L", wl]],
-    loss: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    gain: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    wins: [["Wins", r => fmt(r.w)], ["Fights", r => fmt(r.w + r.l)], ["Win rate", r => rate(r.w, r.l)]],
-    winrate: [["Win rate", r => rate(r.w, r.l)], ["W / L", wl], ["Fights", r => fmt(r.w + r.l)]],
-    active: [["Fights", r => fmt(r.w + r.l)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
-    underdog: [["Underdog wins", r => fmt(r.w)], ["Biggest gap", r => (r.fid ? `<a class="pl" href="#/report/${encodeURIComponent(r.fid)}" title="Open this fight">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`)]],
-    streak: [["Longest streak", r => `${fmt(r.w)}W`]]
+    elo: [["Elo", r => fmt(r.rating), r => r.rating], ["Peak", r => fmt(r.peak), r => r.peak], ["Win rate", r => rate(r.w, r.l), rateV],
+          ["vs veterans", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-"), r => (r.w ? (r.est || 0) / r.w : -1)], ["W / L", wl, r => r.w + r.l]],
+    loss: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
+    gain: [["Change", chg, r => r.gain], ["Elo now", r => fmt(r.rating), r => r.rating], ["W / L", wl, r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
+    wins: [["Wins", r => fmt(r.w), r => r.w], ["Fights", r => fmt(r.w + r.l), r => r.w + r.l], ["Win rate", r => rate(r.w, r.l), rateV]],
+    active: [["Fights", r => fmt(r.w + r.l), r => r.w + r.l], ["W / L", wl, r => r.w], ["Win rate", r => rate(r.w, r.l), rateV]],
+    underdog: [["Underdog wins", r => fmt(r.w), r => r.w], ["Biggest gap", r => (r.fid ? `<a class="pl" href="#/report/${encodeURIComponent(r.fid)}" title="Open this fight">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`), r => r.best]],
+    streak: [["Longest streak", r => `${fmt(r.w)}W`, r => r.w]]
   }[kind];
+  const ls = sorts.lb;
+  if (ls.kind !== kind) { ls.kind = kind; ls.key = "rank"; ls.dir = 1; }
+  const ranked = rows.map((r, i) => ({ r, i }));
+  if (ls.key === "name") ranked.sort((a, b) => a.r.n.localeCompare(b.r.n) * ls.dir);
+  else if (ls.key !== "rank" && cols[Number(ls.key)]) { const f = cols[Number(ls.key)][2]; ranked.sort((a, b) => ((f(a.r) - f(b.r)) * ls.dir) || a.i - b.i); }
+  else if (ls.dir < 0) ranked.reverse();
+  const lth = (key, label, num = true) => `<th class="sort ${num ? "num" : ""} ${ls.key === key ? "on" : ""}" data-sort="lb:${key}">${label}${ls.key === key ? (ls.dir < 0 ? " ▾" : " ▴") : ""}</th>`;
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
     elo: `<div class="notes">
       <div><b>Elo</b><span>Rating system Glicko-2. Each value also has an uncertainty (shown on the player page); it shrinks with every meaningful fight and grows again during long breaks.</span></div>
       <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
-      <div><b>Weighting</b><span>A fight counts by the experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20, and each person's share gets smaller the larger the own side.</span></div>
+      <div><b>Weighting</b><span>A fight counts by the season experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20, and each person's share gets smaller the larger the own side.</span></div>
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
-      <div><b>vs established</b><span>Share of wins against experienced players (Solo from 100 fights, Small and Group from 20).</span></div>
+      <div><b>vs veterans</b><span>Share of wins against players with many fights this season: Solo from 150, Small from 50, Group from 75. That is roughly the more active half of all opponents.</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
     </div>`,
-    loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value and at least 20 fights before the period.",
-    gain: "Elo won in the period, at least 3 fights in the period. Only players with a reliable value and at least 20 fights before the period, so new players finding their level do not fill the list.",
-    winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
+    loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
+    gain: "Elo won in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
     streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
   }[kind] || "";
@@ -1551,8 +1559,8 @@ VIEWS.lb = async (ctx, route) => {
     ${building ? `<div class="warn info" style="margin-bottom:16px"><span>The Elo is still being calculated from all fights since the start of the season, currently up to ${esc(eloUpTo(data.cur))}. The numbers grow into place over the next minutes.</span></div>` : ""}
     <div class="panel">
       ${rows.length ? `<div class="tbl-wrap"><table class="tbl">
-        <thead><tr><th>#</th><th>Player</th><th>Class</th>${cols.map(([l]) => `<th class="num">${l}</th>`).join("")}</tr></thead>
-        <tbody>${rows.map((r, i) => `
+        <thead><tr>${lth("rank", "#", false)}${lth("name", "Player", false)}<th>Class</th>${cols.map(([l], k) => lth(String(k), l)).join("")}</tr></thead>
+        <tbody>${ranked.map(({ r, i }) => `
           <tr class="${i < 3 ? `top${i + 1}` : ""}"><td class="rank-c">${i + 1}</td><td>${realmDot(r.r)}${nameHtml(r.n)}</td><td class="muted">${r.c ? esc(className(r.c)) : ""}</td>${cols.map(([, f], k) => `<td class="num ${k === 0 ? "main" : ""}">${f(r)}</td>`).join("")}</tr>`).join("")}</tbody>
       </table></div>
       ${limit < 100 && rows.length >= 25 ? `<button class="btn full" data-set="n=100">Show top 100</button>` : ""}` : `<div class="empty">No players for this selection yet.</div>`}
@@ -2087,7 +2095,7 @@ document.addEventListener("click", event => {
   if (sort) {
     const [table, key] = sort.dataset.sort.split(":");
     const s = sorts[table];
-    if (s.key === key) s.dir = -s.dir; else { s.key = key; s.dir = key === "label" ? 1 : -1; }
+    if (s.key === key) s.dir = -s.dir; else { s.key = key; s.dir = key === "label" || key === "name" || key === "rank" ? 1 : -1; }
     render({ keepScroll: true });
     return;
   }

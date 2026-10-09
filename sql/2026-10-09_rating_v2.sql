@@ -125,3 +125,9 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 -- cron 'ewa-heat-refresh' um Minute 17.
 -- elo_board 'gain'/'loss': nur Spieler mit Unsicherheit bis 200 und mindestens 20 Fights vor dem Zeitraum
 -- (vorher fuellten Rueckkehrer und Neulinge mit grossen Spruengen die Liste).
+
+-- Version 5 (09.10. 15:20): Erfahrung = Saisonfights des Gegners (Tabelle elo_exp, aus Version 4
+--   uebernommen, greatest mit aktuellem Stand), nicht mehr der Stand am Tag des Fights.
+--   "vs veterans" ab Solo 150, Small 50, Gruppe 75 Fights (etwa die aktivere Haelfte der Gegner).
+--   Rising/Falling: Unsicherheit bis 200 und mindestens 20 Fights (ohne "20 vor dem Zeitraum").
+create table if not exists public.elo_exp (bucket smallint not null, name text not null, n int not null, primary key (bucket, name));
