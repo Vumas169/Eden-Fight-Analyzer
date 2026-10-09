@@ -123,3 +123,5 @@ revoke all on function public._elo_step(int) from public, anon, authenticated;
 -- Heatmap der letzten 30 Tage wird stuendlich vorberechnet (vorher 2 s je Aufruf):
 -- function _heat_refresh() schreibt meta 'heat30', activity_heat(30, null) liest es,
 -- cron 'ewa-heat-refresh' um Minute 17.
+-- elo_board 'gain'/'loss': nur Spieler mit Unsicherheit bis 200 und mindestens 20 Fights vor dem Zeitraum
+-- (vorher fuellten Rueckkehrer und Neulinge mit grossen Spruengen die Liste).

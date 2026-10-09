@@ -1540,8 +1540,8 @@ VIEWS.lb = async (ctx, route) => {
       <div><b>vs established</b><span>Share of wins against experienced players (Solo from 100 fights, Small and Group from 20).</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
     </div>`,
-    loss: "Elo lost in the period (from the first fight in the period to the last), at least 3 fights. Who had a bad run.",
-    gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
+    loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value and at least 20 fights before the period.",
+    gain: "Elo won in the period, at least 3 fights in the period. Only players with a reliable value and at least 20 fights before the period, so new players finding their level do not fill the list.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
     streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
