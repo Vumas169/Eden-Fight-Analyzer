@@ -1,5 +1,8 @@
--- Drei Elo-Wertungen: 1 = Solo (1v1), 2 = Small (groessere Seite 2 bis 5),
--- 3 = Gruppe (groessere Seite 6 und mehr). Gruppen: Teamdurchschnitt gegen
+-- Drei Elo-Wertungen nach der EIGENEN Seite: 1 = Solo (allein, auch 1v3),
+-- 2 = Small (eigene Seite 2 bis 5), 3 = Gruppe (eigene Seite 6 und mehr).
+-- Ein Duo, das gegen 6 gewinnt, spielt in Small, die 6 in Gruppe.
+-- (Stand im Repo: siehe Datenbank; _elo_step wurde am 09.10. auf die eigene
+-- Seite umgestellt.) Gruppen: Teamdurchschnitt gegen
 -- Teamdurchschnitt, jeder Spieler bekommt die Aenderung mit seinem K
 -- (32 in den ersten 30 Fights der Wertung, danach 16).
 -- elo_day haelt Start- und End-Elo je Spieler und Tag (Berlin) fuer den
@@ -152,3 +155,8 @@ select cron.schedule('ewa-elo', '30 seconds', 'select public._elo_step(20000)');
 --   $f$ delete from elo_day where day < current_date - 35 $f$;
 -- revoke all on function public._elo_day_trim() from public, anon, authenticated;
 -- select cron.schedule('ewa-elo-day-trim', '41 3 * * *', 'select public._elo_day_trim()');
+
+-- Neustart nach der Umstellung auf die eigene Seite (vom Nutzer ausgefuehrt):
+-- truncate public.elo, public.elo_day;
+-- delete from public.meta where key in ('elo_cur', 'elo_built');
+-- select cron.alter_job((select jobid from cron.job where jobname = 'ewa-elo'), active := true);

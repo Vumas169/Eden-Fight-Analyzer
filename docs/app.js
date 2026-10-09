@@ -225,8 +225,9 @@ const api = {
   fight: id => cached(`fg|${id}`, HOUR, () => rpc("fight_get", { p_id: id }))
 };
 
-// Elo brackets: 1 = solo (1v1), 2 = small (bigger side 2 to 5), 3 = group (6 and more)
-const BRACKETS = [[1, "Solo", "1v1"], [2, "Small", "bigger side 2 to 5"], [3, "Group", "bigger side 6 to 8+"]];
+// Elo brackets by the size of the player's OWN side: 1 = solo (alone, also
+// 1v3), 2 = small (own side 2 to 5), 3 = group (own side 6 and more)
+const BRACKETS = [[1, "Solo", "own side 1"], [2, "Small", "own side 2 to 5"], [3, "Group", "own side 6 and more"]];
 const bracketName = b => (BRACKETS.find(x => x[0] === b) || [0, "?"])[1];
 
 // ------------------------------------------------------------------
@@ -748,6 +749,15 @@ VIEWS.over = async (ctx) => {
 
   const recent = (recentRaw.rows || []).map(fightFromRow);
   watchFights(recent);
+  // Latest fights by type, as in the Discord channels: 1v1, 8v8 and the rest
+  const kind = ["all", "1v1", "8v8", "other"].includes(store.get("efa-ov-kind", "all")) ? store.get("efa-ov-kind", "all") : "all";
+  const isDuel = f => f.ws === 1 && f.ls === 1;
+  const isBig = f => bigSide(f) >= 8;
+  let latest = recent;
+  if (kind === "1v1") latest = recent.filter(isDuel);
+  if (kind === "8v8") latest = ((await api.feed(48, 8, 300, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(isBig);
+  if (kind === "other") latest = ((await api.feed(24, null, 3000, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => !isDuel(f) && !isBig(f));
+  if (!ctx.alive()) return;
   updateLive(pulse.last);
   const before = state.ui.overSeen || new Set();
   state.ui.overSeen = new Set(recent.map(f => f.id));
@@ -784,8 +794,9 @@ VIEWS.over = async (ctx) => {
       <div class="stack">
         <div class="panel">${hoursBarsHtml(hours, "Fights per hour · last 24 h")}</div>
         <div class="panel">
-          <h2>Latest fights <em>click a fight for both line-ups</em><a class="right more" href="#/fights?h=24">All fights</a></h2>
-          ${fightListHtml(recent, "over", f => fightHtml(f, null, { isNew: before.size && !before.has(f.id) }))}
+          <h2>Latest fights ${miniSeg("efa-ov-kind", kind, [["all", "All"], ["1v1", "1v1"], ["8v8", "8v8"], ["other", "Other"]])}<a class="right more" href="#/fights?h=24">All fights</a></h2>
+          ${fightListHtml(latest, "over", f => fightHtml(f, null, { isNew: before.size && !before.has(f.id) }))}
+          <div class="note">${kind === "8v8" ? "A side with 8 or more, last 2 days." : kind === "other" ? "Everything except 1v1 and 8v8, last 24 hours." : kind === "1v1" ? "Last 3 hours." : "Last 3 hours."} Click a fight for both line-ups.</div>
         </div>
       </div>
       <div class="stack">
@@ -1405,7 +1416,7 @@ VIEWS.lb = async (ctx, route) => {
   }[kind];
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
-    elo: `Elo per bracket: Solo = 1v1, Small = bigger side 2 to 5, Group = bigger side 6 and more. Group fights count team average against team average. Start 1500, K 32 for the first 30 fights of a bracket, then 16. Listed from 20 fights, active in the chosen period.`,
+    elo: `Each side counts in the bracket of its own size: Solo = alone (a 1v3 too), Small = own side 2 to 5, Group = own side 6 and more. A duo beating six plays in Small, the six in Group. Team average against team average, start 1500, K 32 for the first 30 fights of a bracket, then 16. Listed from 20 fights, active in the chosen period.`,
     gain: "Elo won or lost in the period (from the first fight in the period to the last), at least 3 fights. Shows who really performed, not who has been on top for a long time.",
     winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
@@ -1966,7 +1977,11 @@ document.addEventListener("keydown", event => {
 });
 
 $("#bell").addEventListener("click", toggleBell);
+let lastReload = 0;
 $("#reload").addEventListener("click", () => {
+  const wait = 10 * SECOND - (Date.now() - lastReload);
+  if (wait > 0) { toast(`Just reloaded. Again in ${Math.ceil(wait / SECOND)} s.`); return; }
+  lastReload = Date.now();
   for (const [k, v] of memo) if (!v.pending) memo.delete(k);
   const btn = $("#reload");
   btn.classList.add("spinning");
