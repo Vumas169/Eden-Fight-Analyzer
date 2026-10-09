@@ -763,7 +763,7 @@ function fightListHtml(items, key, renderOne) {
   if (!items.length) return `<div class="empty">No fights in this selection.</div>`;
   return `
     <div class="fights">${items.slice(0, shown).map(renderOne).join("")}</div>
-    ${items.length > shown ? `<button class="btn full" data-act="more" data-key="${key}">Show ${fmt(Math.min(LIST_STEP * 4, items.length - shown))} more of ${fmt(items.length - shown)}</button>` : ""}`;
+    ${items.length > shown ? `<button class="btn full" data-act="more" data-key="${key}">Show ${fmt(Math.min(LIST_STEP * 4, items.length - shown))} more${items.length - shown > LIST_STEP * 4 ? ` (${fmt(items.length - shown)} left)` : ""}</button>` : ""}`;
 }
 
 function oppListHtml(entries, valueKey, unit = "") {
@@ -1172,7 +1172,7 @@ VIEWS.player = async (ctx, route) => {
         if (!e) return tile(`Elo ${label}`, "-", `no ${label.toLowerCase()} fights`);
         const [, rating, rank, peak, games, w, l, gain, rd, opp, est] = e;
         const g = gain ? ` · <span class="${gain > 0 ? "w" : "l"}">${gain > 0 ? "+" : ""}${fmt(gain)}</span> 7 d` : "";
-        const provisional = rd != null && rd > 150;
+        const provisional = rd != null && rd > 200;
         const status = rank ? `rank ${fmt(rank)}` : games < 20 ? `${fmt(games)} of 20 fights` : "provisional";
         return `<div class="tile" title="${esc(hint)}: ${fmt(w)} W / ${fmt(l)} L, peak ${fmt(peak)}${provisional ? ". Provisional: not enough recent, meaningful fights for a reliable value" : ""}"><span>Elo ${label}</span><strong>${fmt(rating)}${rd != null ? `<small class="rd">±${fmt(rd)}</small>` : ""}</strong><em>${status}${g}</em>${w ? `<em>${fmt1(pct(est || 0, w))}% of wins vs established</em>` : ""}</div>`;
       }).join("")}
@@ -1520,7 +1520,7 @@ VIEWS.lb = async (ctx, route) => {
   const rate = (w, l) => (w + l ? `${fmt1(pct(w, w + l))}%` : "-");
   const wl = r => `<span class="w">${fmt(r.w)}</span> / <span class="l">${fmt(r.l)}</span>`;
   const cols = {
-    elo: [["Elo", r => `${fmt(r.rating)}${r.rd != null ? ` <span class="sub">±${fmt(r.rd)}</span>` : ""}`], ["Peak", r => fmt(r.peak)],
+    elo: [["Elo", r => fmt(r.rating)], ["Peak", r => fmt(r.peak)],
           ["vs established", r => (r.est != null && r.w ? `${fmt1(pct(r.est, r.w))}%` : "-")], ["W / L", wl]],
     loss: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
     gain: [["Change", r => `<span class="${r.gain >= 0 ? "w" : "l"}">${r.gain >= 0 ? "+" : ""}${fmt(r.gain)}</span>`], ["Elo now", r => fmt(r.rating)], ["W / L", wl], ["Win rate", r => rate(r.w, r.l)]],
@@ -1533,9 +1533,9 @@ VIEWS.lb = async (ctx, route) => {
   const building = isElo && data && data.cur && !eloCaughtUp(data.cur);
   const note = {
     elo: `<div class="notes">
-      <div><b>Elo</b><span>Rating system Glicko-2. The ± shows how certain the value is; it shrinks with every meaningful fight and grows again during long breaks.</span></div>
-      <div><b>Listed</b><span>Only reliable ratings (± 150 or less), from 20 fights, active in the chosen period.</span></div>
-      <div><b>Weighting</b><span>A fight counts by the experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20.</span></div>
+      <div><b>Elo</b><span>Rating system Glicko-2. Each value also has an uncertainty (shown on the player page); it shrinks with every meaningful fight and grows again during long breaks.</span></div>
+      <div><b>Listed</b><span>Only reliable values (uncertainty 200 or less), from 20 fights, active in the chosen period.</span></div>
+      <div><b>Weighting</b><span>A fight counts by the experience of the less experienced side. Solo: almost nothing below 20 fights, about 70% at 50, in full from 100. Small and Group: in full from 20, and each person's share gets smaller the larger the own side.</span></div>
       <div><b>Repeats</b><span>Several solo fights against the same opponent within 24 hours count less each time.</span></div>
       <div><b>vs established</b><span>Share of wins against experienced players (Solo from 100 fights, Small and Group from 20).</span></div>
       <div><b>Brackets</b><span>Each side counts by its own size: Solo, Small (2 to 5), Group (6 and more).</span></div>
@@ -1548,7 +1548,7 @@ VIEWS.lb = async (ctx, route) => {
   }[kind] || "";
 
   ctx.view.innerHTML = `${head}
-    ${building ? `<div class="warn" style="margin-bottom:16px"><span>The Elo is still being calculated from all fights since the start of the season, currently up to ${esc(eloUpTo(data.cur))}. The numbers grow into place over the next minutes.</span></div>` : ""}
+    ${building ? `<div class="warn info" style="margin-bottom:16px"><span>The Elo is still being calculated from all fights since the start of the season, currently up to ${esc(eloUpTo(data.cur))}. The numbers grow into place over the next minutes.</span></div>` : ""}
     <div class="panel">
       ${rows.length ? `<div class="tbl-wrap"><table class="tbl">
         <thead><tr><th>#</th><th>Player</th><th>Class</th>${cols.map(([l]) => `<th class="num">${l}</th>`).join("")}</tr></thead>
