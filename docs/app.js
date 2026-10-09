@@ -680,7 +680,7 @@ function tzOffsetHours(tz, date = new Date()) {
 function tzLabel() {
   const tz = Intl.DateTimeFormat().resolvedOptions().timeZone || "local";
   const off = -new Date().getTimezoneOffset() / 60;
-  return `your time: ${tz.replace(/_/g, " ")}, UTC${off >= 0 ? "+" : "-"}${Math.abs(off)}`;
+  return `${tz.replace(/_/g, " ")}, UTC${off >= 0 ? "+" : "-"}${Math.abs(off)}`;
 }
 
 function heatmapHtml(cells) {
