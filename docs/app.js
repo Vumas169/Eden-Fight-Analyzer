@@ -1,7 +1,7 @@
 // Eden Fight Analyzer by Vumas - web app
 // Reads everything from the shared database. No request goes to Eden.
 
-const VERSION = "1.0.0";
+const VERSION = "1.1.0";
 const SB_URL = "https://bvbrhgyvwmhypmyuuqeu.supabase.co";
 const SB_KEY = "sb_publishable_xFsrXEB0pYNgV_nljbK6lw_yySLDZ5c";
 const EDEN_FIGHT_URL = id => `https://eden-daoc.net/fights?id=${encodeURIComponent(id)}`;
@@ -31,7 +31,7 @@ const ROLES = {
     "Bonedancer", "Warlock", "Thane", "Eldritch", "Enchanter", "Mentalist", "Animist", "Bainshee", "Occultist"],
   Stealth: ["Infiltrator", "Scout", "Nightshade", "Ranger", "Hunter"],
   Support: ["Cleric", "Friar", "Minstrel", "Healer", "Shaman", "Bard", "Druid", "Warden"],
-  Tank: ["Armsman", "Paladin", "Mercenary", "Reaver", "Mauler", "Champion", "Hero", "Blademaster", "Vampiir",
+  Tank: ["Armsman", "Paladin", "Mercenary", "Reaver", "Champion", "Hero", "Blademaster", "Vampiir",
     "Valewalker", "Warrior", "Berserker", "Savage", "Valkyrie", "Skald", "Shadowblade"]
 };
 const ROLE_OF = {};
@@ -71,7 +71,7 @@ const pad2 = n => String(n).padStart(2, "0");
 const fmtDate = d => (d ? `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)} ${pad2(d.getHours())}:${pad2(d.getMinutes())}` : "-");
 const fmtDay = d => (d ? `${pad2(d.getDate())}/${pad2(d.getMonth() + 1)}/${d.getFullYear()}` : "-");
 const fmtClock = d => `${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
-const fmtDur = s => (s == null || !(s >= 0) ? "-" : `${Math.floor(s / 60)}:${pad2(Math.round(s % 60))}`);
+const fmtDur = s => { if (s == null || !(s >= 0)) return "-"; const t = Math.round(s); return `${Math.floor(t / 60)}:${pad2(t % 60)}`; };
 const capitalize = t => (t ? t.charAt(0).toUpperCase() + t.slice(1) : t);
 const norm = t => String(t || "").trim().toLowerCase();
 
@@ -107,7 +107,7 @@ async function rpc(fn, body = {}) {
   try {
     return await rpcOnce(fn, body);
   } catch (error) {
-    if (!/statement timeout|did not answer/i.test(error.message)) throw error;
+    if (!/statement timeout/i.test(error.message)) throw error;
     await new Promise(r => setTimeout(r, 400));
     return rpcOnce(fn, body);
   }
@@ -193,6 +193,7 @@ function cached(key, ttl, loader, force = false) {
   memo.set(key, { ...(hit || {}), pending });
   return pending;
 }
+const rowsOf = x => (x && Array.isArray(x.rows) ? x.rows : []);
 const peek = key => { const hit = memo.get(key); return hit && "value" in hit ? hit.value : undefined; };
 
 const api = {
@@ -327,24 +328,31 @@ function weightedLowerQuartile(values) {
 // ------------------------------------------------------------------
 
 const chars = new Map(); // name -> { c, r }
-const charsPending = new Set();
+const charsPending = new Map(); // name -> promise of the request that loads it
 
 async function loadChars(names) {
-  const missing = [...new Set(names)].filter(n => n && !chars.has(n) && !charsPending.has(n));
-  if (!missing.length) return;
-  missing.forEach(n => charsPending.add(n));
-  try {
-    for (let i = 0; i < missing.length; i += 400) {
-      const part = missing.slice(i, i + 400);
-      const list = await rpc("chars_info", { p_names: part });
-      for (const [name, c, r] of list || []) chars.set(name, { c, r });
-      for (const n of part) if (!chars.has(n)) chars.set(n, { c: null, r: null });
-    }
-  } catch (e) {
-    /* names stay without icon */
-  } finally {
-    missing.forEach(n => charsPending.delete(n));
+  const unique = [...new Set(names)].filter(Boolean);
+  const waiting = [...new Set(unique.map(n => charsPending.get(n)).filter(Boolean))];
+  const missing = unique.filter(n => !chars.has(n) && !charsPending.has(n));
+  if (missing.length) {
+    const job = (async () => {
+      try {
+        for (let i = 0; i < missing.length; i += 400) {
+          const part = missing.slice(i, i + 400);
+          const list = await rpc("chars_info", { p_names: part });
+          for (const [name, c, r] of Array.isArray(list) ? list : []) chars.set(name, { c, r });
+          for (const n of part) if (!chars.has(n)) chars.set(n, { c: null, r: null });
+        }
+      } catch (e) {
+        /* names stay without icon and are tried again next time */
+      } finally {
+        missing.forEach(n => charsPending.delete(n));
+      }
+    })();
+    missing.forEach(n => charsPending.set(n, job));
+    waiting.push(job);
   }
+  await Promise.all(waiting);
 }
 
 // Adds class icons to every name in root that does not have one yet
@@ -356,8 +364,9 @@ async function hydrate(root) {
   for (const el of els) {
     if (el.dataset.h) continue;
     const info = chars.get(el.dataset.n);
+    if (!info) continue; // not loaded (network error): try again on the next render
     el.dataset.h = "1";
-    if (info && info.c) el.insertAdjacentHTML("afterbegin", classIcon(info.c));
+    if (info.c) el.insertAdjacentHTML("afterbegin", classIcon(info.c));
   }
 }
 
@@ -371,7 +380,7 @@ const classIcon = id => {
   if (!name) return `<span class="ci role-unknown" title="Unknown class">${ICON.Unknown}</span>`;
   return `<img class="ci" src="${ICON_URL(name)}" alt="" title="${esc(name)}" decoding="async">`;
 };
-const roleIcon = role => `<span class="ci role-${String(role || "Unknown").toLowerCase()}" title="${esc(role || "Unknown")}">${ICON[role] || ICON.Unknown}</span>`;
+const roleIcon = role => { const r = ICON[role] && role !== "Unknown" ? role : "Unknown"; return `<span class="ci role-${r.toLowerCase()}" title="${r}">${ICON[r]}</span>`; };
 const realmDot = r => (REALMS[r] ? `<span class="rm r${r}" title="${REALMS[r]}"></span>` : "");
 const classHtml = (id, realm) => `<span class="cls">${realm !== undefined ? realmDot(realm) : ""}${classIcon(id)}<span class="cn">${esc(className(id))}</span></span>`;
 
@@ -387,14 +396,17 @@ const namesHtml = names => `<span class="names">${names.map(nameHtml).join("")}<
 // ------------------------------------------------------------------
 
 const FAV_KEY = "efa-favs";
-const favs = () => store.get(FAV_KEY, []);
+const FAV_MAX = 30;
+const favs = () => { const v = store.get(FAV_KEY, []); return Array.isArray(v) ? v.filter(n => typeof n === "string" && n).slice(0, FAV_MAX) : []; };
 const isFav = name => favs().some(n => norm(n) === norm(name));
 
 function toggleFav(name) {
   const list = favs();
   const i = list.findIndex(n => norm(n) === norm(name));
-  if (i >= 0) list.splice(i, 1); else list.push(name);
-  store.set(FAV_KEY, list.slice(-16));
+  if (i >= 0) list.splice(i, 1);
+  else if (list.length >= FAV_MAX) { toast(`You can keep up to ${FAV_MAX} favorites. Remove one first.`); return; }
+  else list.push(name);
+  store.set(FAV_KEY, list);
   renderFavs();
 }
 
@@ -503,10 +515,13 @@ async function toggleBell() {
 // New fights of favorites, checked with every refresh
 const seenFights = new Set();
 let watchPrimed = false;
+// Fights from before the page was opened never notify, also when the first
+// list came from the browser cache and the fresh one arrives later.
+const WATCH_FROM = Date.now() - 30 * MINUTE;
 
 function watchFights(fights) {
   const list = favs().map(norm);
-  const fresh = fights.filter(f => !seenFights.has(f.id));
+  const fresh = fights.filter(f => !seenFights.has(f.id) && f.date && f.date.getTime() >= WATCH_FROM);
   fights.forEach(f => seenFights.add(f.id));
   if (!watchPrimed) { watchPrimed = true; return; }
   if (!list.length || !store.get(NOTIFY_KEY, false)) return;
@@ -518,7 +533,11 @@ function watchFights(fights) {
     const text = `${who} ${w ? "won" : "lost"} a ${f.ws}v${f.ls}${f.zone ? ` in ${f.zone}` : ""}`;
     toast(`<b>${esc(text)}</b><div class="sub">${esc((w ? f.losers : f.winners).slice(0, 4).join(", "))}</div>`, `#/player/${encodeURIComponent(who)}`);
     if ("Notification" in window && Notification.permission === "granted" && document.hidden) {
-      try { new Notification("Eden Fight Analyzer", { body: text, icon: "icons/icon-192.png", tag: f.id }); } catch (e) { /* ignore */ }
+      const opts = { body: text, icon: "icons/icon-192.png", tag: f.id };
+      // Android only allows notifications through the service worker
+      (navigator.serviceWorker ? navigator.serviceWorker.getRegistration() : Promise.resolve(null))
+        .then(reg => (reg ? reg.showNotification("Eden Fight Analyzer", opts) : new Notification("Eden Fight Analyzer", opts)))
+        .catch(() => {});
     }
   }
 }
@@ -532,7 +551,8 @@ const state = { route: { page: "over", arg: "", params: new URLSearchParams() },
 function parseHash() {
   const raw = location.hash.replace(/^#\/?/, "");
   const [path, query = ""] = raw.split("?");
-  const parts = path.split("/").filter(Boolean).map(decodeURIComponent);
+  const dec = t => { try { return decodeURIComponent(t); } catch (e) { return t; } };
+  const parts = path.split("/").filter(Boolean).map(dec);
   const page = parts[0] || "over";
   const map = { "": "over", over: "over", fights: "fights", player: "player", classes: "classes", leaderboard: "lb", compare: "compare", report: "report" };
   return { page: map[page] || "over", arg: parts[1] || "", params: new URLSearchParams(query) };
@@ -581,8 +601,9 @@ async function render(options = {}) {
   } catch (error) {
     if (!ctx.alive()) return;
     if (silent) return; // keep what is on screen
-    ctx.view.innerHTML = `<div class="warn"><span>Could not load: ${esc(error.message)}</span><button class="btn" data-act="retry">Try again</button></div>`;
-    console.error(error);
+    const offline = !navigator.onLine || /not reachable/i.test(error.message);
+    ctx.view.innerHTML = `<div class="warn"><span>${offline ? "No connection to the database. Check your internet connection." : `Could not load: ${esc(error.message)}`}</span><button class="btn" data-act="retry">Try again</button></div>`;
+    if (!offline) logError(error.message, `render ${page}`);
   }
   if (!ctx.alive()) return;
   if (keepScroll || silent) window.scrollTo(0, y);
@@ -808,8 +829,11 @@ async function copyText(text, button) {
 }
 
 // Elo cursor "ts|id": calculated up to this fight
-const eloUpTo = cur => { const t = Date.parse(String(cur).split("|")[0]); return Number.isFinite(t) ? fmtDay(new Date(t)) : "-"; };
-const eloCaughtUp = cur => { const t = Date.parse(String(cur).split("|")[0]); return Number.isFinite(t) && Date.now() - t < 2 * HOUR; };
+// Postgres text like "2026-10-09 17:34:12.28+00" is not ISO; Safari cannot parse it as is
+const pgTime = text => Date.parse(String(text || "").split("|")[0].trim().replace(" ", "T").replace(/([+-]\d\d)$/, "$1:00"));
+const eloUpTo = cur => { const t = pgTime(cur); return Number.isFinite(t) ? fmtDay(new Date(t)) : "-"; };
+// the rating job lags a few minutes behind; far behind means a full recalculation is running
+const eloCaughtUp = cur => { const t = pgTime(cur); return !Number.isFinite(t) || Date.now() - t < 6 * HOUR; };
 
 const loadingHtml = () => `<div class="grid"><div class="skel h"></div><div class="skel t"></div></div>`;
 const appUrl = hash => `${location.origin}${location.pathname}${hash}`;
@@ -833,7 +857,7 @@ VIEWS.over = async (ctx) => {
   const heat = await api.heat().catch(() => null);
   if (!ctx.alive()) return;
 
-  const recent = (recentRaw.rows || []).map(fightFromRow);
+  const recent = rowsOf(recentRaw).map(fightFromRow);
   watchFights(recent);
   // Latest fights by type, as in the Discord channels: 1v1, 8v8 and the rest
   // the winning side decides: 1v2 is solo, 6v8 is "other" (Eden lists
@@ -841,8 +865,8 @@ VIEWS.over = async (ctx) => {
   const kind = ["all", "solo", "8v8", "other"].includes(store.get("efa-ov-kind", "all")) ? store.get("efa-ov-kind", "all") : "all";
   let latest = recent;
   if (kind === "solo") latest = recent.filter(f => f.ws === 1);
-  if (kind === "8v8") latest = ((await api.feed(48, 8, 300, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => f.ws >= 8);
-  if (kind === "other") latest = ((await api.feed(24, null, 3000, ctx.silent).catch(() => ({ rows: [] }))).rows || []).map(fightFromRow).filter(f => f.ws >= 2 && f.ws <= 7);
+  if (kind === "8v8") latest = rowsOf(await api.feed(48, 8, 300, ctx.silent).catch(() => null)).map(fightFromRow).filter(f => f.ws >= 8);
+  if (kind === "other") latest = rowsOf(await api.feed(24, null, 3000, ctx.silent).catch(() => null)).map(fightFromRow).filter(f => f.ws >= 2 && f.ws <= 7);
   if (!ctx.alive()) return;
   updateLive(pulse.last);
   const before = state.ui.overSeen || new Set();
@@ -868,8 +892,17 @@ VIEWS.over = async (ctx) => {
     <div class="page-head">
       <div><h1>Eden right now</h1><p>Live from Eden's fight feed. Updates every minute while this page is open.</p></div>
     </div>
+    ${store.get("efa-intro-done", false) ? "" : `<div class="intro panel">
+      <div><b>Welcome.</b> This app shows every PvP fight on Eden: who fought whom, who won, and what that says about players and classes.</div>
+      <ol>
+        <li>Search your character in the field at the top (or press /).</li>
+        <li>Mark players with the star to follow them. They appear at the top of every page.</li>
+        <li>Classes and Leaderboard compare win rates and Elo across the server.</li>
+      </ol>
+      <button class="btn" data-act="intro-close">Got it</button>
+    </div>`}
     <div class="tiles">
-      ${tile("Fights today", fmt(pulse.today), "since midnight")}
+      ${tile("Fights today", fmt(pulse.today), "since midnight, Berlin time")}
       ${tile("Last 24 hours", fmt(pulse.day), solo ? `${fmt1(pct(solo[1], pulse.day))}% solo` : "fights")}
       ${tile("Active players", fmt(pulse.active), "last 24 hours")}
       ${tile("Biggest upset", underdogs.length ? `${underdogs[0].ws}v${underdogs[0].ls}` : "-", underdogs.length ? `${esc(underdogs[0].winners.slice(0, 2).join(", "))}${underdogs[0].winners.length > 2 ? " ..." : ""}` : "smaller side won, 24 h")}
@@ -951,7 +984,7 @@ const hoursParam = (params, fallback) => {
 };
 const sizeParam = params => {
   const s = Number(params.get("s") || 0);
-  return s >= 1 && s <= 8 ? s : 0;
+  return Number.isInteger(s) && s >= 1 && s <= 8 ? s : 0;
 };
 
 VIEWS.fights = async (ctx, route) => {
@@ -961,8 +994,8 @@ VIEWS.fights = async (ctx, route) => {
   if (!ctx.silent && !peek(key)) ctx.view.innerHTML = `${fightsHeadHtml(hours, size)}${loadingHtml()}`;
   const data = await api.feed(hours || null, size, 3000, ctx.silent);
   if (!ctx.alive()) return;
-  const fights = (data.rows || []).map(fightFromRow);
-  const total = Number(data.total) || fights.length;
+  const fights = rowsOf(data).map(fightFromRow);
+  const total = Number(data && data.total) || fights.length;
 
   let secs = 0;
   let timed = 0;
@@ -1056,14 +1089,14 @@ VIEWS.player = async (ctx, route) => {
   if (!ctx.silent && !peek(`pfeed|${norm(name)}`)) ctx.view.innerHTML = loadingHtml();
   const [data, card] = await Promise.all([api.playerFeed(name, ctx.silent), api.card(name).catch(() => null)]);
   if (!ctx.alive()) return;
-  const realName = data.name || name;
+  const realName = (data && data.name) || name;
   if (realName !== name) {
     history.replaceState(null, "", buildHash("player", realName, Object.fromEntries(route.params.entries())));
     state.route.arg = realName;
     renderFavs();
   }
   document.title = `${realName} · Eden Fight Analyzer`;
-  const fights = (data.rows || []).map(fightFromRow);
+  const fights = rowsOf(data).map(fightFromRow);
   const all = playerRows(fights, realName);
   const since = hours ? Date.now() - hours * HOUR : 0;
   const bracket = [1, 2, 3].includes(Number(route.params.get("br"))) ? Number(route.params.get("br")) : 0;
@@ -1293,7 +1326,8 @@ function rateTable(table, rows, minFights, firstLabel, rowAttrs) {
 VIEWS.classes = async (ctx, route) => {
   const p = route.params;
   const view = ["rates", "quality", "matrix"].includes(p.get("v")) ? p.get("v") : "rates";
-  const wi = Math.min(CLASS_WINDOWS.length - 1, Math.max(0, Number(p.has("w") ? p.get("w") : 1)));
+  const wRaw = Number(p.has("w") ? p.get("w") : 1);
+  const wi = Number.isInteger(wRaw) ? Math.min(CLASS_WINDOWS.length - 1, Math.max(0, wRaw)) : 1;
   const hours = CLASS_WINDOWS[wi][0] || null;
   const size = sizeParam(p);
   const realm = [1, 2, 3].includes(Number(p.get("r"))) ? Number(p.get("r")) : 0;
@@ -1475,7 +1509,7 @@ VIEWS.classes = async (ctx, route) => {
 
 const LB_KINDS = [["elo", "Elo"], ["skill", "Skill"], ["gain", "Rising"], ["loss", "Falling"], ["wins", "Wins"], ["active", "Active"], ["underdog", "Underdog"], ["streak", "Streak"]];
 const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
-const LB_TITLE = { elo: "Current Elo, reliable ratings only", skill: "Elo without gains from farming much weaker opponents", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", winrate: "Best win rate", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
+const LB_TITLE = { elo: "Current Elo, reliable ratings only", skill: "Elo without gains from farming much weaker opponents", gain: "Most Elo won in the period", loss: "Most Elo lost in the period", wins: "Most wins", active: "Most fights", underdog: "Most wins as the smaller side", streak: "Longest win streak" };
 const svgI = d => `<svg viewBox="0 0 20 20"><path d="${d}" fill="none" stroke="currentColor" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
 const LB_ICON = {
   elo: svgI("M4 15l4-4 3 3 5-6M13 8h3v3"),
@@ -1483,7 +1517,6 @@ const LB_ICON = {
   gain: svgI("M10 16V4M5 9l5-5 5 5"),
   loss: svgI("M10 4v12M5 11l5 5 5-5"),
   wins: svgI("M6 3h8v4a4 4 0 01-8 0zM10 11v4M7 17h6M6 5H3.5a2 2 0 002.5 3M14 5h2.5a2 2 0 01-2.5 3"),
-  winrate: svgI("M4 16L16 4M6 5.5a1.5 1.5 0 100 .01M14 14.5a1.5 1.5 0 100 .01"),
   active: svgI("M3 10h3l2-5 4 10 2-5h3"),
   underdog: svgI("M4 15l3-6 3 3 3-7 3 10"),
   streak: svgI("M11 2L5 11h5l-1 7 6-9h-5z")
@@ -1559,7 +1592,7 @@ VIEWS.lb = async (ctx, route) => {
     loss: "Elo lost in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
     gain: "Elo won in the period, at least 3 fights in the period. Only players with a reliable value (as in the Elo list).",
     underdog: "Wins where the own side was smaller. Biggest gap shows the largest difference in one fight.",
-    streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
+    streak: `Longest run of wins within the period, at most the last ${(data && data.days) || 30} days.`
   }[kind] || "";
 
   ctx.view.innerHTML = `${head}
@@ -1610,14 +1643,12 @@ VIEWS.compare = async (ctx, route) => {
   if (!ctx.alive()) return;
   const nameA = (cardA && cardA.name) || a;
   const nameB = (cardB && cardB.name) || b;
-  const rowsA = playerRows((feedA.rows || []).map(fightFromRow), nameA);
+  const rowsA = playerRows(rowsOf(feedA).map(fightFromRow), nameA);
   const tb = norm(nameB);
   const h2h = rowsA.filter(r => r.opponents.some(o => norm(o) === tb));
   const together = rowsA.filter(r => r.mates.some(m => norm(m) === tb));
   const hw = h2h.filter(r => r.won).length;
   const tw = together.filter(r => r.won).length;
-  const ra = profA && profA.rating;
-  const rb = profB && profB.rating;
 
   const line = (label, va, vb, num = null, higherBetter = true) => {
     let ca = "";
@@ -1711,7 +1742,8 @@ const ROLE_ORDER = ["Caster", "Tank", "Stealth", "Support"];
 const CLASS_ID = Object.fromEntries(Object.entries(CLASS_NAMES).map(([id, name]) => [name, Number(id)]));
 
 function saveReport(report) {
-  if (!report || !report.id) return;
+  if (!report || !/^[0-9a-z]{1,10}$/i.test(String(report.id || ""))) return;
+  report.id = String(report.id).toLowerCase();
   store.set(REPORT_PREFIX + report.id, { t: Date.now(), r: report });
   // keep the newest 15
   try {
@@ -1745,11 +1777,11 @@ function duelHtml(rows) {
 
 function compHtml(side) {
   const c = side.comp || {};
-  const roles = (c.roles || []).map(([role, n]) => `<span class="role-stat">${roleIcon(role)}<b>${n}</b> ${esc(role)}</span>`).join("");
-  const chips = (c.groups || []).map(g => `<span class="cchip">${CLASS_ID[g.cls] ? classIcon(CLASS_ID[g.cls]) : roleIcon(g.role)}${g.count > 1 ? `<b>${g.count}×</b>` : ""}${esc(g.cls)}</span>`).join("");
+  const roles = (c.roles || []).map(([role, n]) => `<span class="role-stat">${roleIcon(role)}<b>${fmt(n)}</b> ${esc(role)}</span>`).join("");
+  const chips = (c.groups || []).map(g => `<span class="cchip">${CLASS_ID[g.cls] ? classIcon(CLASS_ID[g.cls]) : roleIcon(g.role)}${g.count > 1 ? `<b>${fmt(g.count)}×</b>` : ""}${esc(g.cls)}</span>`).join("");
   return `
     <div class="comp-side">
-      <div class="comp-line"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "W" : "L"}</span>${realmDot(REALM_ID[c.realm])}<span class="muted">${esc(c.realm || "?")}</span>${roles}${c.unknown ? `<span class="role-stat">${roleIcon("Unknown")}<b>${c.unknown}</b> unknown</span>` : ""}</div>
+      <div class="comp-line"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "W" : "L"}</span>${realmDot(REALM_ID[c.realm])}<span class="muted">${esc(c.realm || "?")}</span>${roles}${c.unknown ? `<span class="role-stat">${roleIcon("Unknown")}<b>${fmt(c.unknown)}</b> unknown</span>` : ""}</div>
       <div class="comp-chips">${chips || '<span class="muted">-</span>'}</div>
       ${(c.core || []).length ? `<div class="comp-core">Support core: ${c.core.map(esc).join(" · ")}</div>` : ""}
     </div>`;
@@ -1787,7 +1819,7 @@ function rosterHtml(side) {
               ${nameHtml(p.name)}${p.name === side.leader ? '<span class="lead-mark" title="Group leader">★</span>' : ""}
               <span class="sub">${esc(p.cls || "unknown")}${p.guild ? ` · &lt;${esc(p.guild)}&gt;` : ""}</span>
               ${topHeal && st.hd === topHeal ? '<span class="mvp heal" title="Most healing of the side">top heal</span>' : ""}
-              ${topCc && ccOf(st) === topCc ? `<span class="mvp cc" title="Most mez, stun and root of the side: ${topCc}">top cc</span>` : ""}
+              ${topCc && ccOf(st) === topCc ? `<span class="mvp cc" title="Most mez, stun and root of the side: ${fmt(topCc)}">top cc</span>` : ""}
               ${topTank && st.dt === topTank ? '<span class="mvp tank" title="Most damage taken of the side">top tank</span>' : ""}
               <span class="rr" title="${fmt(p.points)} realm rank steps">${esc(p.rank || "")}</span>
             </div>
@@ -1797,7 +1829,7 @@ function rosterHtml(side) {
               ${big(st.hd) ? `<span title="Healing done"><b class="heal">${big(st.hd)}</b> heal${hShare ? `<i>${hShare}%</i>` : ""}</span>` : ""}
               ${big(st.hr) ? `<span title="Healing received"><b>${big(st.hr)}</b> recv</span>` : ""}
               ${cc}
-              ${st.d ? `<span class="l" title="Deaths">✝ ${st.d}</span>` : ""}
+              ${st.d ? `<span class="l" title="Deaths">✝ ${fmt(st.d)}</span>` : ""}
             </div>
           </div>`;
       }).join("")}
@@ -1873,7 +1905,7 @@ VIEWS.report = async (ctx, route) => {
   let report = loadReport(id);
   if (!report && window.opener && !state.ui.askedOpener) {
     state.ui.askedOpener = true;
-    try { window.opener.postMessage({ type: "efa-ready", id }, "*"); } catch (e) { /* no opener */ }
+    try { window.opener.postMessage({ type: "efa-ready", id }, "https://eden-daoc.net"); } catch (e) { /* no opener */ }
   }
   if (ctx.silent && report) return; // a finished report does not change
   if (!ctx.silent) ctx.view.innerHTML = `<div class="panel"><div class="empty"><span class="spin"></span> Loading the fight ...</div></div>`;
@@ -1955,7 +1987,9 @@ VIEWS.report = async (ctx, route) => {
 window.addEventListener("message", event => {
   if (!/^https:\/\/(www\.)?eden-daoc\.net$/.test(event.origin)) return;
   const data = event.data;
-  if (!data || data.type !== "efa-report" || !data.report || !data.report.id) return;
+  if (!data || data.type !== "efa-report" || !data.report || typeof data.report !== "object") return;
+  if (!/^[0-9a-z]{1,10}$/i.test(String(data.report.id || ""))) return;
+  try { if (JSON.stringify(data.report).length > 300000) return; } catch (e) { return; }
   saveReport(data.report);
   if (state.route.page === "report" && String(state.route.arg).toLowerCase() === String(data.report.id).toLowerCase()) render();
   else location.hash = `#/report/${encodeURIComponent(data.report.id)}`;
@@ -2029,8 +2063,11 @@ function attachSuggest(input, onPick) {
     pick(a.dataset.pick);
   });
   input.addEventListener("blur", () => setTimeout(close, 120));
-  document.addEventListener("mousedown", e => { if (!input.parentElement.contains(e.target)) close(); });
 }
+// One listener for all suggestion boxes: a click elsewhere closes them
+document.addEventListener("mousedown", e => {
+  $$(".suggest").forEach(box => { if (!box.hidden && !box.parentElement.contains(e.target)) box.hidden = true; });
+});
 
 // ------------------------------------------------------------------
 // Hover card for names
@@ -2055,9 +2092,9 @@ function showPopFor(el) {
     const vs = viewing && norm(viewing) !== norm(name) ? [viewing] : null;
     let c;
     try { c = await api.card(name, vs); } catch (e) { return; }
-    if (popFor !== el) return;
-    const n = c.wins + c.losses;
-    const n7 = c.wins7 + c.losses7;
+    if (popFor !== el || !c) return;
+    const n = (c.wins || 0) + (c.losses || 0);
+    const n7 = (c.wins7 || 0) + (c.losses7 || 0);
     const pop = $("#pop");
     pop.innerHTML = `
       <h3>${realmDot(c.realm)}${c.class ? classIcon(c.class) : ""}${esc(c.name)}</h3>
@@ -2066,7 +2103,7 @@ function showPopFor(el) {
         <span>All fights</span><b>${n ? `<span class="w">${fmt(c.wins)}</span> / <span class="l">${fmt(c.losses)}</span> · ${fmt1(pct(c.wins, n))}%` : "none"}</b>
         <span>Last 7 days</span><b>${n7 ? `<span class="w">${fmt(c.wins7)}</span> / <span class="l">${fmt(c.losses7)}</span> · ${fmt1(pct(c.wins7, n7))}%` : "none"}</b>
         <span>Last fight</span><b>${esc(ago(c.last))}</b>
-        ${vs && (c.vs_wins || c.vs_losses) ? `<span>vs ${esc(viewing)}</span><b><span class="w">${c.vs_wins}</span> / <span class="l">${c.vs_losses}</span></b>` : ""}
+        ${vs && (c.vs_wins || c.vs_losses) ? `<span>vs ${esc(viewing)}</span><b><span class="w">${fmt(c.vs_wins)}</span> / <span class="l">${fmt(c.vs_losses)}</span></b>` : ""}
       </div>`;
     const rect = el.getBoundingClientRect();
     pop.hidden = false;
@@ -2119,6 +2156,7 @@ document.addEventListener("click", event => {
   if (act) {
     const a = act.dataset.act;
     if (a === "retry") render();
+    if (a === "intro-close") { store.set("efa-intro-done", true); act.closest(".intro").remove(); }
     if (a === "more") {
       state.ui.shown = state.ui.shown || {};
       state.ui.shown[act.dataset.key] = (state.ui.shown[act.dataset.key] || LIST_FIRST[act.dataset.key] || LIST_STEP) + LIST_STEP * 4;
@@ -2239,6 +2277,20 @@ attachSuggest($("#q"), name => {
 // Start
 // ------------------------------------------------------------------
 
+// Errors in the app are sent to the database (at most a few per visit), so
+// problems of other users can be looked at later.
+let errorsSent = 0;
+function logError(message, source) {
+  if (errorsSent >= 5 || !message) return;
+  errorsSent += 1;
+  rpcOnce("log_client_error", {
+    p_ver: `${VERSION} v${APP_V}`, p_msg: String(message).slice(0, 300), p_src: String(source || "").slice(0, 200),
+    p_page: location.hash.slice(0, 200), p_ua: navigator.userAgent.slice(0, 120)
+  }).catch(() => {});
+}
+window.addEventListener("error", e => logError(e.message, `${e.filename || ""}:${e.lineno || ""}`));
+window.addEventListener("unhandledrejection", e => logError(e.reason && (e.reason.message || String(e.reason)), "promise"));
+
 async function startup() {
   renderBell();
   api.marks().then(m => {
@@ -2248,18 +2300,23 @@ async function startup() {
     for (let s = 2; s <= 8; s += 1) if (!m[s] && m[s - 1]) durationMarks[s] = durationMarks[s - 1];
   }).catch(() => {});
   api.dbInfo().then(info => {
-    $("#foot-db").textContent = `${fmt(info.fights)} fights · ${fmt(info.chars)} players · since ${fmtDay(new Date(info.first))}`;
+    $("#foot-db").textContent = `${fmt(info.fights)} fights · ${fmt(info.chars)} players · since ${fmtDay(new Date(info.first))} · app ${VERSION}`;
   }).catch(() => {});
   api.pulse().then(p => updateLive(p.last)).catch(() => {});
   await render();
 
-  // Background refresh: only while the page is visible
+  // Background refresh: only while the page is visible and nobody is typing.
+  // Big lists refresh less often (the player feed can hold thousands of rows).
+  const EVERY = { over: 1, fights: 2, player: 5 };
+  let tick = 0;
   setInterval(() => {
     if (document.hidden) return;
+    tick += 1;
     const page = state.route.page;
-    if (page === "over" || page === "fights" || page === "player") render({ silent: true });
-    if (page !== "over") api.feed(3, null, 400, true).then(d => watchFights((d.rows || []).map(fightFromRow))).catch(() => {});
-    api.pulse(true).then(p => updateLive(p.last)).catch(() => {});
+    const typing = document.activeElement && document.activeElement.matches("input, textarea, select") && $("#view").contains(document.activeElement);
+    if (EVERY[page] && tick % EVERY[page] === 0 && !typing) render({ silent: true });
+    if (page !== "over") api.feed(3, null, 400, true).then(d => watchFights(((d && d.rows) || []).map(fightFromRow))).catch(() => {});
+    api.pulse(true).then(p => p && updateLive(p.last)).catch(() => {});
   }, REFRESH_MS);
   document.addEventListener("visibilitychange", () => {
     if (!document.hidden && state.route.page === "over") render({ silent: true });
@@ -2270,5 +2327,4 @@ async function startup() {
   }
 }
 
-window.EFA = { VERSION, state, memo };
 startup();

@@ -1,0 +1,36 @@
+# Weekly database backup.
+# Needs two repository secrets (Settings > Secrets and variables > Actions):
+#   SUPABASE_DB_URL     connection string from Supabase (Connect > Session pooler), with password
+#   BACKUP_PASSPHRASE   any long password; the dump is encrypted with it
+# The encrypted file is kept as a workflow artifact for 30 days.
+# Restore: gpg -d backup.sql.gz.gpg | gunzip | psql "<connection string>"
+name: Database backup
+
+on:
+  schedule:
+    - cron: "17 4 * * 1"
+  workflow_dispatch:
+
+jobs:
+  backup:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Dump, compress, encrypt
+        env:
+          DB_URL: ${{ secrets.SUPABASE_DB_URL }}
+          PASS: ${{ secrets.BACKUP_PASSPHRASE }}
+        run: |
+          set -euo pipefail
+          test -n "$DB_URL" && test -n "$PASS"
+          # tokens of the collectors and the Discord settings are not part of the backup
+          docker run --rm -e DB_URL postgres:17 sh -c 'pg_dump "$DB_URL" --schema=public --no-owner --no-privileges \
+            --exclude-table-data=public.submitters --exclude-table-data=public.dc_channels \
+            --exclude-table-data=public.client_errors --exclude-table-data=public.rate_log' \
+            | gzip -9 | gpg --batch --yes --pinentry-mode loopback --passphrase "$PASS" -c -o backup.sql.gz.gpg
+          ls -lh backup.sql.gz.gpg
+      - uses: actions/upload-artifact@v4
+        with:
+          name: db-backup-${{ github.run_id }}
+          path: backup.sql.gz.gpg
+          retention-days: 30

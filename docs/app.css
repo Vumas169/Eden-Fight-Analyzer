@@ -527,3 +527,8 @@ img.ci { object-fit: cover; background: #1d1a12; }
 .notes > div { display: grid; grid-template-columns: 120px 1fr; gap: 12px; }
 .notes b { color: var(--muted); font-weight: 600; }
 @media (max-width: 520px) { .notes > div { grid-template-columns: 1fr; gap: 0; } }
+
+/* first visit */
+.intro { margin-bottom: 16px; display: grid; gap: 8px; border-color: rgba(216, 178, 92, .35); }
+.intro ol { margin: 0; padding-left: 20px; color: var(--muted); display: grid; gap: 4px; }
+.intro .btn { justify-self: start; }
