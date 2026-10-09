@@ -1913,7 +1913,7 @@ VIEWS.report = async (ctx, route) => {
     if (lead > 0) names.unshift(names.splice(lead, 1)[0]);
     return `
       <div class="hero-side ${side.won ? "is-win" : "is-loss"}">
-        <div class="hs-head"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "Victory" : "Defeat"}</span>${realmDot(REALM_ID[(side.comp || {}).realm])}<span class="muted">${esc((side.comp || {}).realm || "?")}</span><span class="right sub">${names.length} players</span></div>
+        <div class="hs-head"><span class="tag ${side.won ? "w" : "l"}">${side.won ? "Victory" : "Defeat"}</span>${realmDot(REALM_ID[(side.comp || {}).realm])}<span class="muted">${esc((side.comp || {}).realm || "?")}</span><span class="right sub">${names.length} ${names.length === 1 ? "player" : "players"}</span></div>
         <div class="hs-names">${names.map(nameHtml).join(" ")}</div>
       </div>`;
   };
