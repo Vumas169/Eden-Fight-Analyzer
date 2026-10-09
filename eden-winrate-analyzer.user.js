@@ -2,7 +2,7 @@
 // @name         Eden Fight Analyzer by Vumas
 // @author       Vumas
 // @namespace    https://github.com/Vumas169/Eden-Fight-Analyzer
-// @version      0.99
+// @version      1.00
 // @description  Winrate, head-to-head and overview from the fight list, class analysis from a shared database, plus RA and comp comparison on the fight detail page.
 // @match        https://eden-daoc.net/fights*
 // @match        https://www.eden-daoc.net/fights*
@@ -28,7 +28,7 @@
   // Realm rank as RA points: points = (RR - 1) * 10 + level
   // Examples: 2L0 = 10, 3L5 = 25, 8L3 = 73
 
-  const VERSION = "0.99";
+  const VERSION = "1.00";
 
   // Optional own logo: put an image URL here. Empty means no image.
   const LOGO_URL = "";
@@ -1001,6 +1001,7 @@
 
     lastPlayerView = { rows, player, mostWins, mostLosses, h2hName, h2hRows };
     renderWinrate(rows, player, mostWins, mostLosses, h2hName, h2hRows);
+    if (feed.source === "db") renderProfile(player);
     setStatus("");
   }
 
@@ -1111,6 +1112,7 @@
   }
 
   function setPlayer(name) {
+    profileShowAll = false;
     viewPlayer = capitalize(String(name || "").trim());
     sessionSet(PLAYER_KEY, viewPlayer);
     const input = $("#ewa-player");
@@ -1453,7 +1455,12 @@
 
   // Reloads the open fights tab once a minute, unless you are just using it
   function autoRefreshTick() {
-    if (currentTab !== "fights" || !panelOpen() || document.hidden) return;
+    if (!panelOpen() || document.hidden) return;
+    if (currentTab === "over") {
+      if (Date.now() - lastInteraction >= FEED.idleMs && !cardVisible()) renderOverviewTab();
+      return;
+    }
+    if (currentTab !== "fights") return;
     if (Date.now() - lastInteraction < FEED.idleMs || cardVisible()) return;
     if (Date.now() - feed.at < FEED.autoMs) return;
     // Without a fresh read of Eden's list (collector stopped, paused or
@@ -1761,7 +1768,7 @@
     }, { passive: true });
 
     panel.addEventListener("mouseover", event => {
-      const name = event.target.closest(".ewa-pick, .ewa-fav");
+      const name = event.target.closest(".ewa-pick, .ewa-fav, .ewa-goto");
       const row = name ? null : event.target.closest(".ewa-fight[data-fid]");
       const target = name || row;
       if (target === cardTarget) return;
@@ -2518,6 +2525,8 @@
         </span>`)}
 
       ${sizesHtml(rows)}
+
+      <div id="ewa-prof"></div>
 
       <div class="ewa-opponents">
         <div class="ewa-opp-col is-win">
@@ -4353,6 +4362,7 @@
   const REALM_NAME = { 1: "Albion", 2: "Midgard", 3: "Hibernia" };
 
   const ana = {
+    view: ["rates", "quality", "matrix"].includes(storageGet("ewa-ana-view")) ? storageGet("ewa-ana-view") : "rates",
     win: 1,
     size: 0,
     realm: 0,
@@ -4370,6 +4380,10 @@
       `<button class="ewa-ana-btn ${on ? "is-on" : ""}" ${attrName}="${value}">${label}</button>`;
 
     return `
+      <div class="ewa-ana-ctrl">
+        <span class="ewa-ana-ctrl-label">View</span>
+        <div class="ewa-loadbar">${[["rates", "Win rates"], ["quality", "Quality"], ["matrix", "Matrix"]].map(([v, l]) => button("data-ana-view", v, l, ana.view === v)).join("")}</div>
+      </div>
       <div class="ewa-ana-ctrl">
         <span class="ewa-ana-ctrl-label">Period</span>
         <div class="ewa-loadbar">${ANA_WINDOWS.map((w, i) => button("data-ana-win", i, w.label, ana.win === i)).join("")}</div>
@@ -4718,6 +4732,16 @@
     const key = anaPlayersKey();
 
     ana.copy = { entries, classes: stat.classes, win: win.label };
+
+    let viewHtml = "";
+    if (ana.view !== "rates") {
+      try {
+        viewHtml = ana.view === "quality" ? qualityHtml(await loadQuality(), stat) : matrixHtml(await loadMatrix(), stat);
+      } catch (error) {
+        viewHtml = `<div class="ewa-warn">Not loaded: ${esc(error.message)}</div>`;
+      }
+      if (renderId !== anaRenderId) return;
+    }
     out.innerHTML = `
       <div class="ewa-sum">
         <div class="ewa-sum-title"><span>Classes · ${win.label}</span><span class="ewa-sum-acts"><button class="ewa-mini" id="ewa-copy-ana" title="Copy the table as short text, e.g. for Discord">Copy</button></span></div>
@@ -4726,8 +4750,9 @@
           <div class="ewa-sum-kv"><strong>${fmt(entries.length)}</strong><span>Classes</span></div>
         </div>
       </div>
-      <div class="ewa-section-title" data-sec="classes">Win rate by class</div>
-      ${anaTableHtml(entries, stat.classes)}
+      ${ana.view === "rates" ? `<div class="ewa-section-title" data-sec="classes">Win rate by class</div>${anaTableHtml(entries, stat.classes)}` : ""}
+      ${ana.view === "quality" ? `<div class="ewa-section-title" data-sec="quality">Class quality</div>${viewHtml}` : ""}
+      ${ana.view === "matrix" ? `<div class="ewa-section-title" data-sec="matrix">Class against class</div>${viewHtml}` : ""}
       ${ana.sel ? `
       <div class="ewa-section-title" data-sec="vs">${esc(selName)} against classes ${realmMark(REALM_NAME[ana.sel.realm])}</div>
       <div id="ewa-ana-vs">${anaVsHtml(ana.vs.get(key), stat.classes)}</div>
@@ -4821,11 +4846,470 @@
   }
 
   // ---------------------------------------------------------------
+  // Tabs "Overview" and "Leaderboard", class quality, matchup matrix,
+  // player profile: all read from the shared database, no request to Eden.
+  // ---------------------------------------------------------------
+
+  const OV = { pulse: null, pulseAt: 0, heat: null, heatAt: 0, busy: false };
+  const OV_PULSE_MS = MINUTE;
+  const OV_HEAT_MS = 10 * MINUTE;
+  const SIZE_NAMES = { 1: "Solo", 2: "2", 3: "3", 4: "4", 5: "5", 6: "6", 7: "7", 8: "8+" };
+  const DAY_NAMES = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"];
+
+  // A name that opens the player in the Fights tab (hover shows the card)
+  const gotoName = name => `<span class="ewa-goto" data-player="${esc(name)}">${esc(name)}</span>`;
+
+  function classCell(stat, cls) {
+    const name = className(stat, cls);
+    const role = name ? roleOf(name) : "Unknown";
+    return `<span class="ewa-cls">${icon(role)}<span class="ewa-role-${ROLE_CLASS[role]}">${esc(name || "Unknown")}</span></span>`;
+  }
+
+  function agoText(value) {
+    if (!value) return "-";
+    const minutes = Math.max(0, Math.round((Date.now() - new Date(value).getTime()) / MINUTE));
+    if (minutes < 1) return "just now";
+    if (minutes < 60) return `${minutes} min ago`;
+    const hours = Math.round(minutes / 60);
+    return hours < 48 ? `${hours} h ago` : `${Math.round(hours / 24)} days ago`;
+  }
+
+  const tileHtml = (label, value, sub) => `
+    <div class="ewa-tile"><span>${label}</span><strong>${value}</strong>${sub ? `<em>${sub}</em>` : ""}</div>`;
+
+  // Simple horizontal bars: rows of [label html, value, sub text]
+  function barListHtml(rows, extraClass = "") {
+    if (!rows.length) return `<div class="ewa-muted">No data.</div>`;
+    const max = Math.max(...rows.map(row => row[1]), 1);
+    return `
+      <div class="ewa-bars ${extraClass}">
+        ${rows.map(([label, value, sub]) => `
+          <div class="ewa-bar-row is-plain">
+            <span class="ewa-bar-name">${label}</span>
+            <div class="ewa-bar"><span style="width:${(value / max * 100).toFixed(1)}%"></span></div>
+            <span class="ewa-bar-val">${fmt(value)}</span>
+            <span class="ewa-bar-sub">${sub || ""}</span>
+          </div>`).join("")}
+      </div>`;
+  }
+
+  function hoursBarsHtml(hours) {
+    const list = (hours || []).map(([t, c]) => [Number(t) * SECOND, Number(c)]).sort((a, b) => a[0] - b[0]);
+    if (!list.length) return "";
+    const max = Math.max(...list.map(entry => entry[1]), 1);
+    const clock = time => new Date(time).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit", hour12: false });
+    const step = Math.max(1, Math.round(list.length / 4));
+    const marks = list.filter((_, index) => index % step === 0);
+    return `
+      <div class="ewa-act">
+        <div class="ewa-act-head"><span>Fights per hour, last 24 h</span><b>peak ${fmt(max)}</b></div>
+        <div class="ewa-act-bars">
+          ${list.map(([t, c]) => `<i style="height:${Math.max(6, c / max * 100)}%" title="${clock(t)}: ${fmt(c)} fights"></i>`).join("")}
+        </div>
+        <div class="ewa-act-scale">${marks.map(([t]) => `<span>${clock(t)}</span>`).join("")}</div>
+      </div>`;
+  }
+
+  // Weekday x hour, Berlin time
+  function heatmapHtml(cells) {
+    if (!cells || !cells.length) return "";
+    const grid = Array.from({ length: 7 }, () => new Array(24).fill(0));
+    for (const [dow, hour, count] of cells) grid[Number(dow) - 1][Number(hour)] = Number(count);
+    const max = Math.max(...grid.flat(), 1);
+    return `
+      <div class="ewa-heat">
+        <div class="ewa-heat-hours"><span></span>${Array.from({ length: 24 }, (_, h) => `<span>${h % 6 === 0 ? h : ""}</span>`).join("")}</div>
+        ${grid.map((row, d) => `
+          <div class="ewa-heat-row"><span>${DAY_NAMES[d]}</span>
+            ${row.map((count, h) => `<i style="--a:${(0.06 + count / max * 0.94).toFixed(3)}" title="${DAY_NAMES[d]} ${String(h).padStart(2, "0")}:00 · ${fmt(count)} fights"></i>`).join("")}
+          </div>`).join("")}
+      </div>`;
+  }
+
+  function overviewTabHtml(p, heat, stat) {
+    const realmOf = r => REALM_NAME[r];
+    const sizes = (p.sizes || []).map(([s, c]) => [SIZE_NAMES[s] || s, Number(c), `${fmt1(c / Math.max(p.day, 1) * 100)}%`]);
+    const zones = (p.zones || []).map(([z, c]) => [esc(z), Number(c), ""]);
+    const classes = (p.classes || []).map(([cls, realm, c, players]) => [`${realmMark(realmOf(realm))}${classCell(stat, cls)}`, Number(c), `${fmt(players)} players`]);
+    const people = (list, unit) => (list || []).length ? `
+      <div class="ewa-opp-list">
+        ${list.map(([name, cls, realm, n]) => `
+          <div class="ewa-opp">
+            <span class="ewa-opp-name">${realmMark(realmOf(realm))}${gotoName(name)} <em class="ewa-sub">${esc(className(stat, cls))}</em></span>
+            <span class="ewa-opp-val">${fmt(n)}${unit}</span>
+          </div>`).join("")}
+      </div>` : `<div class="ewa-muted">No data.</div>`;
+    const underdogs = (p.underdogs || []).map(([id, ts, ws, ls, wr, lr, w, l, zone]) => `
+      <a class="ewa-fight is-duel" data-fid="fight_${esc(id)}" href="/fights?id=${encodeURIComponent(id)}" target="_blank" rel="noopener">
+        <span class="ewa-ud">${ws}v${ls}</span>
+        <div class="ewa-fight-main">
+          <span class="ewa-fight-opp">${realmMark(realmOf(wr))}<span class="ewa-namelist">${(w || []).map(gotoName).join(", ")}</span></span>
+          <span class="ewa-fight-mates">beat ${realmMark(realmOf(lr))}${fmt((l || []).length)} · ${esc(zone || "")}</span>
+        </div>
+        <div class="ewa-fight-meta"><span>${fmtDate(new Date(Number(ts) * SECOND))}</span></div>
+      </a>`).join("");
+
+    return `
+      <div class="ewa-tiles">
+        ${tileHtml("Fights today", fmt(p.today), "since midnight")}
+        ${tileHtml("Last 24 h", fmt(p.day), "fights")}
+        ${tileHtml("Active", fmt(p.active), "players, 24 h")}
+        ${tileHtml("Last fight", agoText(p.last), p.last ? fmtDate(new Date(p.last)) : "")}
+      </div>
+      ${hoursBarsHtml(p.hours)}
+      <div class="ewa-cols">
+        <div><div class="ewa-section-title">Group sizes · 24 h</div>${barListHtml(sizes)}</div>
+        <div><div class="ewa-section-title">Zones · 24 h</div>${barListHtml(zones, "is-wide-label")}</div>
+      </div>
+      <div class="ewa-cols">
+        <div><div class="ewa-section-title">Most kills · last hour</div>${people(p.kills_hour, "")}</div>
+        <div><div class="ewa-section-title">Win streaks · 24 h</div>${people(p.streaks, "W")}</div>
+      </div>
+      <div class="ewa-section-title">Underdog wins · 24 h <em>the smaller side won</em></div>
+      ${underdogs ? `<div class="ewa-fights">${underdogs}</div>` : `<div class="ewa-muted">None in the last 24 hours.</div>`}
+      <div class="ewa-section-title">Classes played · 24 h</div>
+      ${barListHtml(classes, "is-wide-label")}
+      <div class="ewa-section-title">Busy times · last 30 days <em>Berlin time</em></div>
+      ${heatmapHtml(heat)}
+      <div class="ewa-ana-note">Fights from Eden's fight feed and the fight list. Updated about once a minute.</div>
+    `;
+  }
+
+  async function renderOverviewTab(force) {
+    const box = $("#ewa-over");
+    if (!box || OV.busy) return;
+    if (!box.innerHTML.trim()) box.innerHTML = `<div class="ewa-muted">Loading ...</div>`;
+    OV.busy = true;
+    try {
+      const now = Date.now();
+      const needPulse = force || !OV.pulse || now - OV.pulseAt > OV_PULSE_MS;
+      const needHeat = force || !OV.heat || now - OV.heatAt > OV_HEAT_MS;
+      const [pulse, heat, stat] = await Promise.all([
+        needPulse ? sbRpc("server_pulse", {}) : OV.pulse,
+        needHeat ? sbRpc("activity_heat", { p_days: 30 }).catch(() => OV.heat) : OV.heat,
+        loadStatic().catch(() => null)
+      ]);
+      if (needPulse) { OV.pulse = pulse; OV.pulseAt = now; }
+      if (needHeat) { OV.heat = heat; OV.heatAt = now; }
+      if (currentTab === "over" && OV.pulse) {
+        const body = $("#ewa-body");
+        const top = body ? body.scrollTop : 0;
+        box.innerHTML = overviewTabHtml(OV.pulse, OV.heat, stat);
+        if (body) body.scrollTop = top;
+      }
+    } catch (error) {
+      box.innerHTML = `<div class="ewa-warn">Overview not loaded: ${esc(error.message)}</div>`;
+    } finally {
+      OV.busy = false;
+    }
+  }
+
+  // --- Leaderboard ---
+
+  const LB_KINDS = [
+    ["rating", "Elo"], ["wins", "Most wins"], ["winrate", "Win rate"],
+    ["active", "Most active"], ["underdog", "Underdog"], ["streak", "Streaks"]
+  ];
+  const LB_PERIODS = [[24, "24 h"], [168, "7 days"], [720, "1 month"], [0, "Season"]];
+  const LB_KEY = "ewa-lb";
+  const lb = Object.assign({ kind: "rating", hours: 168, size: 0, realm: 0, limit: 25 }, storageGet(LB_KEY) || {});
+  const lbCache = new Map();
+
+  function lbControlsHtml() {
+    const button = (attr, value, label, on) => `<button class="ewa-ana-btn ${on ? "is-on" : ""}" ${attr}="${value}">${label}</button>`;
+    return `
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Ranking</span>
+        <div class="ewa-loadbar">${LB_KINDS.map(([k, l]) => button("data-lb-kind", k, l, lb.kind === k)).join("")}</div></div>
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Period</span>
+        <div class="ewa-loadbar">${LB_PERIODS.map(([h, l]) => button("data-lb-hours", h, l, lb.hours === h)).join("")}</div></div>
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Group</span>
+        <div class="ewa-loadbar">${ANA_SIZES.map(s => button("data-lb-size", s, s === 1 ? "Solo" : s ? String(s) : "All", lb.size === s)).join("")}</div></div>
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Realm</span>
+        <div class="ewa-loadbar">${ANA_REALMS.map(([v, l]) => button("data-lb-realm", v, l, lb.realm === v)).join("")}</div></div>
+    `;
+  }
+
+  function lbTableHtml(data, stat) {
+    const rows = (data && data.rows) || [];
+    if (!rows.length) return `<div class="ewa-muted">No players for this selection yet.</div>`;
+    const rate = (w, l) => (w + l ? `${fmt1(w / (w + l) * 100)}%` : "-");
+    const cols = {
+      rating: ["Elo", "Peak", "W / L"],
+      wins: ["Wins", "Fights", "Win rate"],
+      winrate: ["Win rate", "W / L", "Fights"],
+      active: ["Fights", "W / L", "Win rate"],
+      underdog: ["Underdog wins", "Best", ""],
+      streak: ["Longest streak", "", ""]
+    }[lb.kind];
+    const cells = r => ({
+      rating: [fmt(r.rating), fmt(r.peak), `<em class="w">${fmt(r.w)}</em> / <em class="l">${fmt(r.l)}</em>`],
+      wins: [fmt(r.w), fmt(r.w + r.l), rate(r.w, r.l)],
+      winrate: [rate(r.w, r.l), `<em class="w">${fmt(r.w)}</em> / <em class="l">${fmt(r.l)}</em>`, fmt(r.w + r.l)],
+      active: [fmt(r.w + r.l), `<em class="w">${fmt(r.w)}</em> / <em class="l">${fmt(r.l)}</em>`, rate(r.w, r.l)],
+      underdog: [fmt(r.w), r.fid ? `<a href="/fights?id=${encodeURIComponent(r.fid)}" target="_blank" rel="noopener" title="Open this fight">+${fmt(r.best)} enemies</a>` : `+${fmt(r.best)}`, ""],
+      streak: [`${fmt(r.w)}W`, "", ""]
+    }[lb.kind]);
+    const note = {
+      rating: "Elo from 1v1 fights only, starting at 1500, K 32 for the first 30 fights, then 16. Listed from 20 fights, active in the chosen period.",
+      winrate: `Counted from ${fmt(data.min || 10)} fights (at least 10, more when the list has many active players).`,
+      underdog: "Wins where the own side was smaller. Best shows the biggest gap.",
+      streak: `Longest run of wins within the period, at most the last ${data.days || 30} days.`
+    }[lb.kind] || "";
+    return `
+      <div class="ewa-lb">
+        <div class="ewa-lb-row is-head"><span>#</span><span>Player</span><span>Class</span>${cols.map(c => `<span>${c}</span>`).join("")}</div>
+        ${rows.map((r, i) => `
+          <div class="ewa-lb-row ${i < 3 ? `is-top is-top${i + 1}` : ""}">
+            <span class="ewa-lb-rank">${i + 1}</span>
+            <span class="ewa-lb-name">${realmMark(REALM_NAME[r.r])}${gotoName(r.n)}</span>
+            <span>${r.c ? classCell(stat, r.c) : ""}</span>
+            ${cells(r).map((c, k) => `<span class="${k === 0 ? "ewa-lb-main" : "ewa-lb-sub"}">${c}</span>`).join("")}
+          </div>`).join("")}
+      </div>
+      ${note ? `<div class="ewa-ana-note">${note}</div>` : ""}
+    `;
+  }
+
+  let lbRenderId = 0;
+  async function renderLeaderboard(force) {
+    const box = $("#ewa-lb");
+    if (!box) return;
+    const id = ++lbRenderId;
+    storageSet(LB_KEY, lb);
+    $("#ewa-lb-ctrls").innerHTML = lbControlsHtml();
+    const out = $("#ewa-lb-out");
+    const key = JSON.stringify([lb.kind, lb.hours, lb.size, lb.realm, lb.limit]);
+    const cached = lbCache.get(key);
+    if (!cached) out.innerHTML = `<div class="ewa-muted">Loading ...</div>`;
+    try {
+      let data = cached && !force && Date.now() - cached.t < 2 * MINUTE ? cached.data : null;
+      const stat = await loadStatic().catch(() => null);
+      if (!data) {
+        data = await sbRpc("leaderboard", { p_kind: lb.kind, p_hours: lb.hours || null, p_size: lb.size || null, p_realm: lb.realm || null, p_limit: lb.limit });
+        lbCache.set(key, { t: Date.now(), data });
+      }
+      if (id !== lbRenderId) return;
+      out.innerHTML = lbTableHtml(data, stat);
+    } catch (error) {
+      if (id === lbRenderId) out.innerHTML = `<div class="ewa-warn">Leaderboard not loaded: ${esc(error.message)}</div>`;
+    }
+  }
+
+  function handleLeaderboardClick(event) {
+    const hit = selector => event.target.closest(selector);
+    const set = (attr, field, parse) => {
+      const el = hit(`[${attr}]`);
+      if (!el) return false;
+      lb[field] = parse(el.getAttribute(attr));
+      renderLeaderboard();
+      return true;
+    };
+    return set("data-lb-kind", "kind", v => v)
+      || set("data-lb-hours", "hours", Number)
+      || set("data-lb-size", "size", Number)
+      || set("data-lb-realm", "realm", Number);
+  }
+
+  // --- Class quality (Classes tab, view "Quality") ---
+
+  const quality = { cache: new Map(), sort: { key: "mid80", dir: -1 } };
+
+  async function loadQuality() {
+    const win = ANA_WINDOWS[ana.win];
+    const key = `${win.h}|${ana.size}`;
+    const hit = quality.cache.get(key);
+    if (hit && Date.now() - hit.t < ANA_CACHE_MS) return hit.rows;
+    const rows = (await sbRpc("class_quality", { p_hours: win.h, p_size: ana.size || null })) || [];
+    quality.cache.set(key, { t: Date.now(), rows });
+    return rows;
+  }
+
+  function qualityHtml(rows, stat) {
+    const list = rows
+      .map(([cls, realm, players, fights, fightWr, playerAvg, mid80, rating]) => ({
+        cls, realm, players, fights, fightWr, playerAvg, mid80, rating,
+        gap: fightWr !== null && playerAvg !== null ? playerAvg - fightWr : null,
+        label: className(stat, cls)
+      }))
+      .filter(r => !ana.realm || r.realm === ana.realm);
+    if (!list.length) return `<div class="ewa-muted">No data for this selection yet.</div>`;
+    const { key, dir } = quality.sort;
+    const val = r => (key === "label" ? r.label.toLowerCase() : r[key] === null ? -Infinity * dir : r[key]);
+    list.sort((a, b) => (val(a) < val(b) ? -1 : val(a) > val(b) ? 1 : 0) * dir || b.fights - a.fights);
+    const head = (k, label, title) => `<span class="ewa-sort ${key === k ? "is-on" : ""}" data-q-sort="${k}" title="${title}">${label}${key === k ? (dir < 0 ? " ▾" : " ▴") : ""}</span>`;
+    const pct = v => (v === null || v === undefined ? "-" : `${fmt1(v)}%`);
+    return `
+      <div class="ewa-q">
+        <div class="ewa-q-row is-head">
+          ${head("label", "Class", "Sort by name")}${head("mid80", "Mid 80%", "Fight-weighted win rate without the best and worst 10% of players")}
+          ${head("playerAvg", "Plyr avg", "Every player counts the same")}${head("fightWr", "Fight WR", "All fights of the qualifying players")}
+          ${head("gap", "Gap", "Plyr avg minus Fight WR")}${head("players", "Players", "Qualifying players")}
+          ${head("fights", "Fights", "Fights of the qualifying players")}${head("rating", "Avg Elo", "Average 1v1 Elo of the class")}
+        </div>
+        ${list.map(r => `
+          <div class="ewa-q-row ${r.players < 10 ? "is-thin" : ""}" data-ana-cls="${Number(r.cls)}" data-ana-crealm="${Number(r.realm)}" title="Show opponents and players of this class">
+            <span class="ewa-ana-name">${realmMark(REALM_NAME[r.realm])}${classCell(stat, r.cls)}</span>
+            <span class="ewa-q-main">${r.mid80 === null ? `<em title="Too few players">-</em>` : `${pct(r.mid80)}${rateBar(r.mid80)}`}</span>
+            <span>${pct(r.playerAvg)}</span><span>${pct(r.fightWr)}</span>
+            <span class="${r.gap > 2 ? "up" : r.gap < -2 ? "down" : ""}">${r.gap === null ? "-" : `${r.gap > 0 ? "+" : ""}${fmt1(r.gap)}`}</span>
+            <span>${fmt(r.players)}</span><span>${fmt(r.fights)}</span><span>${r.rating ? fmt(r.rating) : "-"}</span>
+          </div>`).join("")}
+      </div>
+      <div class="ewa-ana-note">
+        Only players with at least 20 fights and 5 wins in the season count (whatever the period), so a few beginners do not drag a class down.
+        Mid 80% leaves out the best and the worst 10% of players of a class and is the fairest single number.
+        A big gap means a few players with many fights pull the class down (or up). Win rates still mix class strength with player quality.
+      </div>
+    `;
+  }
+
+  // --- Matchup matrix (Classes tab, view "Matrix") ---
+
+  const matrix = { cache: new Map(), row: 1, col: 2 };
+  const MATRIX_MIN = 15;
+
+  async function loadMatrix() {
+    const win = ANA_WINDOWS[ana.win];
+    const key = `${win.h}|${ana.size}`;
+    const hit = matrix.cache.get(key);
+    if (hit && Date.now() - hit.t < ANA_CACHE_MS) return hit.rows;
+    const rows = (await sbRpc("matchup_matrix", { p_hours: win.h, p_size: ana.size || null })) || [];
+    matrix.cache.set(key, { t: Date.now(), rows });
+    return rows;
+  }
+
+  function matrixHtml(rows, stat) {
+    const cell = new Map();
+    const rowCls = new Set();
+    const colCls = new Set();
+    for (const [cls, realm, ocls, orealm, w, l] of rows) {
+      if (realm === matrix.row) rowCls.add(cls);
+      if (orealm === matrix.col) colCls.add(ocls);
+      if (realm === matrix.row && orealm === matrix.col) cell.set(`${cls}|${ocls}`, [w, l]);
+    }
+    const byName = set => [...set].sort((a, b) => className(stat, a).localeCompare(className(stat, b)));
+    const rList = byName(rowCls);
+    const cList = byName(colCls);
+    const short = cls => esc(className(stat, cls).slice(0, 4));
+    const realmBtn = (attr, value, on) => ANA_REALMS.slice(1).map(([v, l]) => `<button class="ewa-ana-btn ${on === v ? "is-on" : ""}" ${attr}="${v}">${l}</button>`).join("");
+    const tone = rate => {
+      const d = Math.max(-1, Math.min(1, (rate - 50) / 20));
+      return d >= 0 ? `rgba(119, 201, 126, ${(0.12 + d * 0.75).toFixed(2)})` : `rgba(224, 112, 106, ${(0.12 - d * 0.75).toFixed(2)})`;
+    };
+    return `
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Rows</span><div class="ewa-loadbar">${realmBtn("data-mx-row", 0, matrix.row)}</div></div>
+      <div class="ewa-ana-ctrl"><span class="ewa-ana-ctrl-label">Against</span><div class="ewa-loadbar">${realmBtn("data-mx-col", 0, matrix.col)}</div></div>
+      ${rList.length && cList.length ? `
+      <div class="ewa-mx" style="--cols:${cList.length}">
+        <div class="ewa-mx-row is-head"><span></span>${cList.map(c => `<span title="${esc(className(stat, c))}">${short(c)}</span>`).join("")}</div>
+        ${rList.map(r => `
+          <div class="ewa-mx-row">
+            <span class="ewa-mx-name" data-ana-cls="${Number(r)}" data-ana-crealm="${matrix.row}">${classCell(stat, r)}</span>
+            ${cList.map(c => {
+              const [w, l] = cell.get(`${r}|${c}`) || [0, 0];
+              const n = w + l;
+              const rate = n ? w / n * 100 : 0;
+              const title = `${className(stat, r)} vs ${className(stat, c)}: ${n ? `${fmt1(rate)}% (${fmt(w)} W / ${fmt(l)} L)` : "no fights"}`;
+              return n >= MATRIX_MIN
+                ? `<i style="background:${tone(rate)}" title="${esc(title)}">${Math.round(rate)}</i>`
+                : `<i class="is-thin" title="${esc(title)}">${n ? Math.round(rate) : ""}</i>`;
+            }).join("")}
+          </div>`).join("")}
+      </div>` : `<div class="ewa-muted">No data for this selection yet.</div>`}
+      <div class="ewa-ana-note">Win rate of the row class against the column class. Faint below ${MATRIX_MIN} fights. In group fights the classes were in the two groups, not necessarily direct opponents. Click a class for details.</div>
+    `;
+  }
+
+  function handleMatrixClick(event) {
+    const row = event.target.closest("[data-mx-row]");
+    if (row) { matrix.row = Number(row.dataset.mxRow); renderAnalysis(); return true; }
+    const col = event.target.closest("[data-mx-col]");
+    if (col) { matrix.col = Number(col.dataset.mxCol); renderAnalysis(); return true; }
+    const q = event.target.closest("[data-q-sort]");
+    if (q) {
+      const k = q.dataset.qSort;
+      if (quality.sort.key === k) quality.sort.dir = -quality.sort.dir;
+      else quality.sort = { key: k, dir: k === "label" ? 1 : -1 };
+      renderAnalysis();
+      return true;
+    }
+    return false;
+  }
+
+  // --- Player profile (Fights tab, player view) ---
+
+  const profileCache = new Map();
+  const PROFILE_VS_LIMIT = 12;
+  let profileShowAll = false;
+
+  async function renderProfile(player) {
+    const box = $("#ewa-prof");
+    if (!box || !player) return;
+    const hours = hoursValue();
+    const key = `${normalizeName(player)}|${hours}|${sizeSel}`;
+    let entry = profileCache.get(key);
+    if (!entry || Date.now() - entry.t > 5 * MINUTE) {
+      entry = { t: Date.now(), pending: sbRpc("player_profile", { p_name: player, p_hours: Number.isFinite(hours) ? hours : null, p_size: sizeSel || null }) };
+      profileCache.set(key, entry);
+      entry.pending.catch(() => profileCache.delete(key));
+    }
+    try {
+      const [data, stat] = await Promise.all([entry.pending, loadStatic().catch(() => null)]);
+      const target = $("#ewa-prof");
+      if (!target || normalizeName(viewPlayer) !== normalizeName(player)) return;
+      target.innerHTML = profileHtml(data, stat);
+    } catch (error) {
+      const target = $("#ewa-prof");
+      if (target) target.innerHTML = "";
+    }
+  }
+
+  function profileHtml(d, stat) {
+    if (!d) return "";
+    const r = d.rating;
+    const vs = d.vs || [];
+    const shown = profileShowAll ? vs : vs.slice(0, PROFILE_VS_LIMIT);
+    const zones = d.zones || [];
+    return `
+      ${r ? `
+      <div class="ewa-tiles is-small">
+        ${tileHtml("Elo (1v1)", fmt(r.rating), `rank ${fmt(r.rank)}`)}
+        ${tileHtml("Peak", fmt(r.peak), "")}
+        ${tileHtml("1v1 fights", fmt(r.games), `<em class="w">${fmt(r.wins)}</em> / <em class="l">${fmt(r.losses)}</em>`)}
+      </div>` : ""}
+      ${vs.length ? `
+      <div class="ewa-section-title">Against classes <em>${esc(periodLabel())} · ${esc(sizeLabel(sizeSel))}</em></div>
+      <div class="ewa-ana-grid">
+        <div class="ewa-ana-head"><span>Class</span><span>Fights</span><span>W</span><span>L</span><span>Win rate</span></div>
+        ${shown.map(([cls, realm, w, l]) => {
+          const t = w + l;
+          const rate = t ? w / t * 100 : 0;
+          return `
+          <div class="ewa-ana-row is-static ${t < 5 ? "is-thin" : ""}">
+            <span class="ewa-ana-name">${realmMark(REALM_NAME[realm])}${classCell(stat, cls)}</span>
+            <span class="ewa-ana-n">${fmt(t)}</span>
+            <span class="ewa-ana-wl w">${fmt(w)}</span>
+            <span class="ewa-ana-wl l">${fmt(l)}</span>
+            <span class="ewa-ana-rate"><b>${fmt1(rate)}%</b>${rateBar(rate)}</span>
+          </div>`;
+        }).join("")}
+      </div>
+      ${!profileShowAll && vs.length > shown.length ? `<button class="ewa-more-btn" id="ewa-prof-more">Show all ${vs.length} classes</button>` : ""}
+      ` : ""}
+      ${zones.length ? `
+      <div class="ewa-section-title">Zones</div>
+      ${barListHtml(zones.map(([z, w, l]) => [esc(z), w + l, `${fmt1(w / Math.max(w + l, 1) * 100)}% won`]), "is-wide-label")}
+      ` : ""}
+    `;
+  }
+
+  // ---------------------------------------------------------------
   // Tabs on the fight list
   // ---------------------------------------------------------------
 
   const TAB_KEY = "ewa-tab";
-  let currentTab = storageGet(TAB_KEY) === "ana" ? "ana" : "fights";
+  const TABS = ["over", "fights", "ana", "lb"];
+  let currentTab = TABS.includes(storageGet(TAB_KEY)) ? storageGet(TAB_KEY) : "over";
 
   function showTab(tab) {
     currentTab = tab;
@@ -4833,11 +5317,11 @@
     document.querySelectorAll("#ewa-panel .ewa-tab").forEach(button => {
       button.classList.toggle("is-on", button.dataset.tab === tab);
     });
-    const fights = $("#ewa-tab-fights");
-    const anaBox = $("#ewa-ana");
-    if (fights) fights.hidden = tab !== "fights";
-    if (anaBox) anaBox.hidden = tab !== "ana";
+    const boxes = { fights: $("#ewa-tab-fights"), ana: $("#ewa-ana"), over: $("#ewa-over"), lb: $("#ewa-lb") };
+    for (const [name, element] of Object.entries(boxes)) if (element) element.hidden = tab !== name;
     if (tab === "ana") renderAnalysis();
+    if (tab === "over") renderOverviewTab();
+    if (tab === "lb") renderLeaderboard();
   }
 
   // Clicks inside the analysis tab. Returns true when handled.
@@ -4854,6 +5338,12 @@
 
     const copy = hit("#ewa-copy-ana");
     if (copy) { copyText(anaCopyText(), copy); return true; }
+
+    const view = hit("[data-ana-view]");
+    if (view) { ana.view = view.dataset.anaView; storageSet("ewa-ana-view", ana.view); renderAnalysis(); return true; }
+
+    if (handleMatrixClick(event)) return true;
+    if (handleLeaderboardClick(event)) return true;
 
     const win = hit("[data-ana-win]");
     if (win) { ana.win = Number(win.dataset.anaWin); ana.showAllPlayers = false; renderAnalysis(); return true; }
@@ -5038,6 +5528,78 @@
       .ewa-card-pl { display: flex; align-items: center; gap: 5px; white-space: nowrap; }
       .ewa-card-pl span { overflow: hidden; text-overflow: ellipsis; }
       .ewa-card-pl em { font-style: normal; font-size: 11px; color: var(--role); margin-left: auto; padding-left: 8px; }
+
+      /* Overview tiles and columns */
+      .ewa-tiles { display: grid; grid-template-columns: repeat(4, minmax(0, 1fr)); gap: 8px; margin-top: 4px; }
+      .ewa-tiles.is-small { grid-template-columns: repeat(3, minmax(0, 1fr)); margin-top: 12px; }
+      .ewa-tile {
+        display: flex; flex-direction: column; gap: 3px; padding: 10px 12px; border-radius: 4px;
+        background: var(--stone-2); border: 1px solid var(--edge); border-top: 2px solid var(--bronze);
+      }
+      .ewa-tile span { font-size: 10px; font-weight: 600; letter-spacing: .7px; color: var(--muted); }
+      .ewa-tile strong { font: 400 22px/1.1 Cinzel, Georgia, serif; color: var(--parch); white-space: nowrap; }
+      .ewa-tile em { font-style: normal; font-size: 11px; color: var(--faint); }
+      .ewa-tile em.w, .ewa-lb em.w { color: var(--win); }
+      .ewa-tile em.l, .ewa-lb em.l { color: var(--loss); }
+      .ewa-cols { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 20px; }
+      .ewa-bars.is-wide-label .ewa-bar-row { grid-template-columns: minmax(0, 150px) 1fr 46px 76px; }
+      .ewa-cols .ewa-bars.is-wide-label .ewa-bar-row { grid-template-columns: minmax(0, 120px) 1fr 40px 20px; }
+      .ewa-sub { font-style: normal; font-size: 11px; color: var(--faint); margin-left: 4px; }
+      .ewa-goto { cursor: pointer; white-space: nowrap; }
+      .ewa-goto:hover { color: var(--bronze); text-decoration: underline; }
+      .ewa-ud { flex: none; min-width: 38px; font-size: 11px; font-weight: 700; color: var(--slow); font-variant-numeric: tabular-nums; }
+      .ewa-cls { display: inline-flex; align-items: center; gap: 5px; white-space: nowrap; }
+
+      /* Busy times heatmap */
+      .ewa-heat { display: grid; gap: 2px; font-size: 9px; color: var(--faint); }
+      .ewa-heat-row, .ewa-heat-hours { display: grid; grid-template-columns: 30px repeat(24, minmax(0, 1fr)); gap: 2px; align-items: center; }
+      .ewa-heat-row i { height: 14px; border-radius: 2px; background: rgba(182, 192, 202, var(--a)); }
+      #ewa-panel.is-wide .ewa-heat-row i { height: 18px; }
+
+      /* Leaderboard */
+      .ewa-lb { display: grid; }
+      .ewa-lb-row {
+        display: grid; grid-template-columns: 28px minmax(0, 1.4fr) minmax(0, 1fr) 78px 78px 70px; gap: 10px; align-items: center;
+        padding: 5px 8px; font-size: 12px; border-bottom: 1px solid #3a4048;
+      }
+      .ewa-lb-row.is-head { font-size: 10px; font-weight: 600; letter-spacing: .7px; color: var(--muted); border-bottom: 1px solid var(--edge); }
+      .ewa-lb-row > span:nth-child(n+4) { text-align: right; font-variant-numeric: tabular-nums; }
+      .ewa-lb-row:not(.is-head):hover { background: var(--stone-3); }
+      .ewa-lb-rank { color: var(--faint); font-variant-numeric: tabular-nums; }
+      .ewa-lb-row.is-top1 .ewa-lb-rank { color: #e2cc6a; font-weight: 700; }
+      .ewa-lb-row.is-top2 .ewa-lb-rank { color: #c9d0d8; font-weight: 700; }
+      .ewa-lb-row.is-top3 .ewa-lb-rank { color: #c8935a; font-weight: 700; }
+      .ewa-lb-name { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+      .ewa-lb-main { font-weight: 700; }
+      .ewa-lb-sub { color: var(--muted); font-size: 11px; }
+      .ewa-lb a { color: inherit; }
+
+      /* Class quality */
+      .ewa-q { display: grid; }
+      .ewa-q-row {
+        display: grid; grid-template-columns: minmax(0, 1.5fr) 112px 56px 56px 46px 50px 56px 52px; gap: 8px; align-items: center;
+        padding: 5px 8px; font-size: 12px; border-bottom: 1px solid #3a4048; cursor: pointer;
+      }
+      .ewa-q-row.is-head { font-size: 10px; font-weight: 600; letter-spacing: .5px; color: var(--muted); border-bottom: 1px solid var(--edge); cursor: default; }
+      .ewa-q-row > span:nth-child(n+3) { text-align: right; font-variant-numeric: tabular-nums; }
+      .ewa-q-row:not(.is-head):hover { background: var(--stone-3); }
+      .ewa-q-row.is-thin { opacity: .45; }
+      .ewa-q-main { display: flex; align-items: center; gap: 6px; font-weight: 700; font-variant-numeric: tabular-nums; }
+      .ewa-q-main em { font-style: normal; color: var(--faint); }
+      .ewa-q-row .up { color: var(--win); }
+      .ewa-q-row .down { color: var(--loss); }
+
+      /* Matchup matrix */
+      .ewa-mx { display: grid; gap: 2px; margin-top: 8px; overflow-x: auto; }
+      .ewa-mx-row { display: grid; grid-template-columns: 112px repeat(var(--cols), minmax(26px, 1fr)); gap: 2px; align-items: center; }
+      .ewa-mx-row.is-head span { font-size: 9.5px; color: var(--muted); text-align: center; overflow: hidden; white-space: nowrap; }
+      .ewa-mx-row i {
+        display: flex; align-items: center; justify-content: center; height: 24px; border-radius: 2px;
+        font-style: normal; font-size: 10.5px; color: var(--text); font-variant-numeric: tabular-nums;
+      }
+      .ewa-mx-row i.is-thin { background: #1e2126; color: var(--faint); }
+      .ewa-mx-name { font-size: 11.5px; cursor: pointer; white-space: nowrap; overflow: hidden; }
+      .ewa-mx-name:hover { color: var(--bronze); }
   `;
 
   // ---------------------------------------------------------------
@@ -5079,7 +5641,10 @@
           <div class="ewa-title">${title}<span class="ewa-by">${markHtml("")}by Vumas</span></div>
           <div id="ewa-cache" class="ewa-muted">${subLabel}</div>
         </div>
-        <button id="ewa-collapse" title="Collapse">−</button>
+        <div class="ewa-head-btns">
+          ${detail ? "" : `<button id="ewa-wide" title="Wider panel">⇔</button>`}
+          <button id="ewa-collapse" title="Collapse">−</button>
+        </div>
       </div>
       <div class="ewa-top-wrap">
         <button id="ewa-top" title="Back to top" hidden>↑ Top</button>
@@ -5088,8 +5653,10 @@
       <div id="ewa-body">
         ${detail ? "" : `
         <div class="ewa-tabs">
+          <button class="ewa-tab" data-tab="over">Overview</button>
           <button class="ewa-tab" data-tab="fights">Fights</button>
-          <button class="ewa-tab" data-tab="ana">Analysis</button>
+          <button class="ewa-tab" data-tab="ana">Classes</button>
+          <button class="ewa-tab" data-tab="lb">Leaderboard</button>
         </div>
         `}
         <div id="ewa-tab-fights">
@@ -5127,6 +5694,11 @@
         <div id="ewa-output"></div>
         </div>
         ${detail ? "" : `
+        <div id="ewa-over" hidden></div>
+        <div id="ewa-lb" hidden>
+          <div id="ewa-lb-ctrls"></div>
+          <div id="ewa-lb-out"></div>
+        </div>
         <div id="ewa-ana" hidden>
           <div id="ewa-ana-ctrls"></div>
           <div id="ewa-ana-out"></div>
@@ -5250,11 +5822,13 @@
         letter-spacing: 1.4px; color: #5a616a; margin-left: 9px; vertical-align: 2px;
       }
       .ewa-head #ewa-cache { color: #5c636c; }
-      #ewa-collapse {
+      .ewa-head-btns { display: flex; gap: 6px; flex: none; }
+      #ewa-collapse, #ewa-wide {
         width: 26px; height: 26px; padding: 0; font-size: 15px; flex: none;
         background: rgba(42, 33, 24, .08) !important; color: var(--ink) !important; border-color: rgba(42, 33, 24, .3) !important;
       }
-      #ewa-collapse:hover { background: rgba(42, 33, 24, .18) !important; }
+      #ewa-collapse:hover, #ewa-wide:hover { background: rgba(42, 33, 24, .18) !important; }
+      #ewa-panel.is-wide { width: 1040px; }
       .ewa-mark { display: inline-flex; width: 12px; height: 12px; }
       .ewa-mark img, img.ewa-mark { width: 100%; height: 100%; border-radius: 2px; object-fit: contain; }
 
@@ -5645,6 +6219,32 @@
 
       if (handleAnalysisClick(event)) return;
 
+      const goto = event.target.closest(".ewa-goto");
+      if (goto) {
+        event.preventDefault();
+        event.stopPropagation();
+        navigate(() => {
+          showTab("fights");
+          searchPlayer(goto.dataset.player || "");
+        });
+        return;
+      }
+
+      if (event.target.closest("#ewa-prof-more")) {
+        profileShowAll = true;
+        renderProfile(viewPlayer);
+        return;
+      }
+
+      if (event.target.closest("#ewa-wide")) {
+        const wide = !panel.classList.contains("is-wide");
+        panel.classList.toggle("is-wide", wide);
+        storageSet("ewa-wide", wide);
+        const box = panel.getBoundingClientRect();
+        if (panel.style.left) placePanel(panel, box.left, box.top);
+        return;
+      }
+
       const tick = event.target.closest(".ewa-tick");
       if (tick) {
         setHourIndex(Number(tick.dataset.hour));
@@ -5774,6 +6374,7 @@
     });
 
     watchCollapse(panel);
+    if (!detail && storageGet("ewa-wide")) panel.classList.add("is-wide");
     makeDraggable(panel);
 
     if (detail) {

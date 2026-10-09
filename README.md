@@ -2,10 +2,13 @@
 
 Tampermonkey userscript for the fight pages of [Eden DAoC](https://eden-daoc.net/fights).
 
-- **Fights**: overview, player stats, head-to-head and recurring groups, read from the shared database (period and group size filter instantly, new fights within about a minute)
+- **Overview**: fights today and in the last 24 hours, fights per hour, group sizes, zones, most kills, win streaks, underdog wins, most played classes, busy times over 30 days
+- **Fights**: player stats with Elo, head-to-head, classes faced, zones, recurring opponents, read from the shared database (new fights within about a minute)
 - Hover a name for a player card, hover a fight for both line-ups with classes, favorites bar, copy a summary for Discord, mouse back button steps back in the panel
-- **Analysis**: class win rates by period, group size and realm, win rates against each enemy class, players per class (from a shared database that every installation helps to fill)
+- **Classes**: win rates by period, group size and realm, a quality view (how good the players of a class are) and a class-against-class matrix
+- **Leaderboard**: Elo, most wins, win rate, most active, underdog wins, streaks
 - **Fight report** on `/fights?id=...`: comp, totals, crowd control and players of both sides
+- Wide mode, the panel can be moved freely (double-click the header to reset)
 
 ## Install
 
@@ -17,4 +20,4 @@ Updates arrive automatically through Tampermonkey.
 
 ## Data collection
 
-While the fights page is open, the script fetches fights from Eden in the background and adds them to the shared database: Eden's list of new fights once a minute, otherwise at most one request every 1.5 seconds, in one tab only, with a daily limit and automatic pauses on errors. Each browser gets its own key. Duplicate fights are not possible.
+The shared database is filled from Eden's public fight feed and the list of recent fights. Collecting directly from Eden in your browser is off by default and only starts when you switch it on. It then runs slowly, in small batches, with less traffic in the evening hours.
